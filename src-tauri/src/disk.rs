@@ -181,6 +181,13 @@ mod mac {
         whole_disk_of(&id)
     }
 
+    /// Where a partition (e.g. `disk7s1`) is mounted, if it is.
+    pub fn mount_point_of(partition: &str) -> Option<String> {
+        let info = diskutil_json(&["info", "-plist", partition]).ok()?;
+        let mp = str_of(&info, "MountPoint");
+        (!mp.is_empty()).then(|| mp.to_string())
+    }
+
     pub fn erase(whole_disk: &str, fs: &str, label: &str) -> Result<(), String> {
         let out = Command::new("diskutil")
             .args(["eraseDisk", fs, label, "MBR", &format!("/dev/{whole_disk}")])
@@ -245,7 +252,12 @@ pub fn format(mount: &Path, label: &str) -> Result<String, String> {
         let fs = target_fs(d.disk_size_bytes);
         mac::erase(&d.whole_disk, if fs == "FAT32" { "FAT32" } else { "ExFAT" }, label)?;
         invalidate_cache();
-        Ok(format!("/Volumes/{label}"))
+        // The volume may mount as "LABEL 1" if that name is taken, so ask rather than assume.
+        let mount = mac::mount_point_of(&format!("{}s1", d.whole_disk)).unwrap_or_else(|| format!("/Volumes/{label}"));
+        // Keep Spotlight off the card: indexing competes with writes on a slow device. The firmware
+        // ignores dot-files, so this is invisible to the Radio Music.
+        let _ = std::fs::write(Path::new(&mount).join(".metadata_never_index"), b"");
+        Ok(mount)
     }
 }
 

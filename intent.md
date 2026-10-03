@@ -11,3 +11,10 @@
  7. As a user, I want the option to normalize all files used on my card, so that I can avoid dramatic differences in volumes. 
  8. As a user, I want to preview audio files before I assign them to a folder on the radiomusic card, so I can be sure about what I'm adding. 
  9. As a user, I want to define a start and end to audio samples before I load them on to the radiomusic card, so I can more gracefully handle large files without making numerous local copies. 
+10. As a user, I want to read and update my settings file using a simple UI wizard as the second step, "Settings", after "Select Card", and before "Select Files"
+
+
+## Non-functional requirements: 
+
+ *  File writes should be optimized for speed and not correctness. This device is designed with chaos and randomness in mind, not precision and data safety.  
+ *  If a user makes a destructive choice, and formatting the card is the fastest way to clear it, simply format the card. 

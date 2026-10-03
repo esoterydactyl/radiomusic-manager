@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::path::{Component, Path, PathBuf};
 
 use rand::rngs::StdRng;
@@ -53,7 +53,7 @@ pub struct Plan {
 
 #[derive(Serialize, Clone, Debug)]
 pub struct Progress {
-    /// `deleting`, then `writing` while copying, then `flushing` for the final flush to the card.
+    /// `formatting` or `deleting` (clearing the card), then `writing` while copying.
     pub phase: &'static str,
     pub done_files: usize,
     pub total_files: usize,
@@ -74,6 +74,10 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 pub fn request_cancel() {
     CANCEL.store(true, Ordering::SeqCst);
 }
+
+/// Clearing a card by formatting it is much faster than deleting files one at a time over FAT.
+/// Needs the macOS-only `diskutil` path, so elsewhere we fall back to deleting audio files.
+const FORMAT_TO_CLEAR: bool = cfg!(target_os = "macos");
 
 const COPY_CHUNK: usize = 1024 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -238,9 +242,8 @@ fn validate(plan: &Plan) -> Result<(), String> {
 /// Copy `src` to `dest` in large chunks, calling `on_chunk(bytes_so_far)` after each. A `false`
 /// return stops the copy: the partial file is removed and `Interrupted` is returned.
 ///
-/// There is deliberately no per-file flush here. A full flush (`F_FULLFSYNC` on macOS) makes the
-/// card flush its internal cache and costs seconds per file on removable flash; the caller flushes
-/// once at the end instead.
+/// There is deliberately no flush anywhere: this tool favours speed over data safety (see the
+/// non-functional requirements in intent.md). The OS writes the data out when the card is ejected.
 fn copy_file(src: &Path, dest: &Path, mut on_chunk: impl FnMut(u64) -> bool) -> std::io::Result<()> {
     let mut reader = File::open(src)?;
     let mut writer = File::create(dest)?;
@@ -260,16 +263,6 @@ fn copy_file(src: &Path, dest: &Path, mut on_chunk: impl FnMut(u64) -> bool) -> 
         }
     }
     writer.flush()
-}
-
-/// Push everything written so far out to the card. Called once, after the last file.
-fn flush_to_card(last_file: &Path) {
-    // Flush the OS write cache for all volumes, then force the card itself to commit.
-    #[cfg(unix)]
-    let _ = std::process::Command::new("sync").status();
-    if let Ok(f) = File::open(last_file) {
-        let _ = f.sync_all();
-    }
 }
 
 /// What to do about audio already on the card.
@@ -292,6 +285,8 @@ pub struct ChangePreview {
     pub copy_bytes: u64,
     /// Planned files already on the card with the same name and size (`Add` mode), so not copied.
     pub unchanged_files: usize,
+    /// True when clearing the card means formatting it (everything on it goes, not just audio).
+    pub will_format: bool,
     /// Things worth knowing before confirming; none of them block the write.
     pub warnings: Vec<String>,
 }
@@ -415,6 +410,7 @@ fn preview_from(changes: &Changes) -> ChangePreview {
         copy_files: changes.copies.len(),
         copy_bytes: changes.copies.iter().map(|f| f.size_bytes).sum(),
         unchanged_files: changes.unchanged,
+        will_format: !changes.delete.is_empty() && FORMAT_TO_CLEAR,
         warnings: changes.warnings.clone(),
     }
 }
@@ -465,7 +461,15 @@ fn delete_audio(card: &Path, files: &[(String, u64)], mut on_each: impl FnMut(us
 }
 
 /// Copy the plan onto `card`, handling audio already there according to `mode`.
-pub fn write(card: &Path, plan: &Plan, mode: Existing, mut on_progress: impl FnMut(Progress)) -> Result<usize, String> {
+///
+/// `on_progress` is also called every quarter second from a separate thread, so the UI keeps
+/// moving (at 0 B/s) while the card itself is stalling inside a system call.
+pub fn write(
+    card: &Path,
+    plan: &Plan,
+    mode: Existing,
+    on_progress: impl Fn(Progress) + Send + Sync,
+) -> Result<usize, String> {
     validate(plan)?;
     if !card.is_dir() {
         return Err(format!("{} is not a directory", card.display()));
@@ -478,8 +482,8 @@ pub fn write(card: &Path, plan: &Plan, mode: Existing, mut on_progress: impl FnM
         .into_iter()
         .find(|v| Path::new(&v.mount_point) == card)
         .ok_or("That folder is not a mounted volume's root")?;
-    // Deleting frees space before the copy starts, so count it.
-    let available = volume.available_bytes + summary.delete_bytes;
+    // A format empties the whole card; deleting only frees the audio's space.
+    let available = if summary.will_format { volume.total_bytes } else { volume.available_bytes + summary.delete_bytes };
     if summary.copy_bytes > available {
         return Err(format!(
             "Not enough space: need {} MB, card will have {} MB free",
@@ -490,100 +494,123 @@ pub fn write(card: &Path, plan: &Plan, mode: Existing, mut on_progress: impl FnM
 
     CANCEL.store(false, Ordering::SeqCst);
 
-    if !changes.delete.is_empty() {
-        let total = changes.delete.len();
-        delete_audio(card, &changes.delete, |i, rel| {
-            on_progress(Progress {
-                phase: "deleting",
-                done_files: i,
-                total_files: total,
-                current: rel.to_string(),
-                bank: None,
-                bank_done: 0,
-                bank_total: 0,
-                bytes_done: 0,
-                bytes_total: 0,
-            });
-        })?;
-    }
-
-    let to_copy: Vec<&PlannedFile> = changes.copies.iter().collect();
+    let to_copy: Vec<PlannedFile> = changes.copies.clone();
     let total = to_copy.len();
     let bytes_total = summary.copy_bytes;
     let mut bank_totals = std::collections::HashMap::<Option<u8>, usize>::new();
     for f in &to_copy {
         *bank_totals.entry(f.bank).or_default() += 1;
     }
-    let mut bank_done = std::collections::HashMap::<Option<u8>, usize>::new();
-    let mut bytes_before = 0u64;
-    let mut last_dest: Option<PathBuf> = None;
 
-    for (i, f) in to_copy.iter().enumerate() {
-        if CANCEL.load(Ordering::SeqCst) {
-            return Err(format!("Cancelled after {i} of {total} files"));
+    let idle = |phase: &'static str, current: String| Progress {
+        phase,
+        done_files: 0,
+        total_files: total,
+        current,
+        bank: None,
+        bank_done: 0,
+        bank_total: 0,
+        bytes_done: 0,
+        bytes_total,
+    };
+    // What the heartbeat thread reports: the latest per-file state plus bytes copied so far.
+    let state = std::sync::Mutex::new(idle("writing", String::new()));
+    let bytes_in_file = std::sync::atomic::AtomicU64::new(0);
+    let finished = AtomicBool::new(false);
+    let publish = |p: Progress| {
+        if let Ok(mut s) = state.lock() {
+            *s = p.clone();
         }
-        let dest = safe_dest(card, &f.dest)?;
-        if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
-            remove_appledouble(dir);
-        }
+        on_progress(p);
+    };
 
-        let base = bytes_before;
-        let snapshot = |bytes_in_file: u64, done_files: usize, bank_done_now: usize| Progress {
-            phase: "writing",
-            done_files,
-            total_files: total,
-            current: f.dest.clone(),
-            bank: f.bank,
-            bank_done: bank_done_now,
-            bank_total: bank_totals[&f.bank],
-            bytes_done: base + bytes_in_file,
-            bytes_total,
-        };
-        let done_in_bank = *bank_done.get(&f.bank).unwrap_or(&0);
-        on_progress(snapshot(0, i, done_in_bank));
-
-        let mut last_report = Instant::now();
-        let result = copy_file(Path::new(&f.src), &dest, |copied| {
-            if CANCEL.load(Ordering::SeqCst) {
-                return false;
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !finished.load(Ordering::SeqCst) {
+                std::thread::sleep(PROGRESS_INTERVAL);
+                let mut p = match state.lock() {
+                    Ok(s) => s.clone(),
+                    Err(_) => break,
+                };
+                if p.phase == "writing" {
+                    p.bytes_done += bytes_in_file.load(Ordering::Relaxed);
+                }
+                on_progress(p);
             }
-            if last_report.elapsed() >= PROGRESS_INTERVAL {
-                last_report = Instant::now();
-                on_progress(snapshot(copied, i, done_in_bank));
-            }
-            true
         });
-        match result {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                return Err(format!("Cancelled after {i} of {total} files"));
+
+        let result = (|| -> Result<usize, String> {
+            let mut card = card.to_path_buf();
+
+            if !changes.delete.is_empty() {
+                if FORMAT_TO_CLEAR {
+                    // Fastest way to clear a card: reformat it, keeping its name if it is a valid label.
+                    publish(idle("formatting", String::new()));
+                    let label = if crate::disk::validate_label(&volume.name).is_ok() { volume.name.clone() } else { "RADIOMUSIC".to_string() };
+                    card = PathBuf::from(crate::disk::format(&card, &label)?);
+                } else {
+                    let n = changes.delete.len();
+                    delete_audio(&card, &changes.delete, |i, rel| {
+                        let mut p = idle("deleting", rel.to_string());
+                        p.done_files = i;
+                        p.total_files = n;
+                        publish(p);
+                    })?;
+                }
             }
-            Err(e) => return Err(format!("Copying {} failed after {i} of {total} files: {e}", f.src)),
-        }
 
-        remove_appledouble(&dest);
-        bytes_before += f.size_bytes;
-        *bank_done.entry(f.bank).or_default() += 1;
-        on_progress(snapshot(f.size_bytes, i + 1, done_in_bank + 1));
-        last_dest = Some(dest);
-    }
+            let mut bank_done = std::collections::HashMap::<Option<u8>, usize>::new();
+            let mut bytes_before = 0u64;
 
-    if last_dest.is_some() || !changes.delete.is_empty() {
-        on_progress(Progress {
-            phase: "flushing",
-            done_files: total,
-            total_files: total,
-            current: String::new(),
-            bank: None,
-            bank_done: 0,
-            bank_total: 0,
-            bytes_done: bytes_total,
-            bytes_total,
-        });
-        flush_to_card(last_dest.as_deref().unwrap_or(card));
-    }
-    Ok(total)
+            for (i, f) in to_copy.iter().enumerate() {
+                if CANCEL.load(Ordering::SeqCst) {
+                    return Err(format!("Cancelled after {i} of {total} files"));
+                }
+                let dest = safe_dest(&card, &f.dest)?;
+                if let Some(dir) = dest.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+                    remove_appledouble(dir);
+                }
+
+                let done_in_bank = *bank_done.get(&f.bank).unwrap_or(&0);
+                let snapshot = |base: u64, done_files: usize, bank_done_now: usize| Progress {
+                    phase: "writing",
+                    done_files,
+                    total_files: total,
+                    current: f.dest.clone(),
+                    bank: f.bank,
+                    bank_done: bank_done_now,
+                    bank_total: bank_totals[&f.bank],
+                    bytes_done: base,
+                    bytes_total,
+                };
+                bytes_in_file.store(0, Ordering::Relaxed);
+                publish(snapshot(bytes_before, i, done_in_bank));
+
+                let result = copy_file(Path::new(&f.src), &dest, |copied| {
+                    bytes_in_file.store(copied, Ordering::Relaxed);
+                    !CANCEL.load(Ordering::SeqCst)
+                });
+                match result {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        return Err(format!("Cancelled after {i} of {total} files"));
+                    }
+                    Err(e) => return Err(format!("Copying {} failed after {i} of {total} files: {e}", f.src)),
+                }
+
+                remove_appledouble(&dest);
+                bytes_before += f.size_bytes;
+                bytes_in_file.store(0, Ordering::Relaxed);
+                *bank_done.entry(f.bank).or_default() += 1;
+                publish(snapshot(bytes_before, i + 1, done_in_bank + 1));
+            }
+            Ok(total)
+        })();
+
+        finished.store(true, Ordering::SeqCst);
+        result
+    })
 }
 
 #[cfg(test)]

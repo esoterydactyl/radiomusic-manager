@@ -442,6 +442,7 @@ interface ChangePreview {
   copy_files: number;
   copy_bytes: number;
   unchanged_files: number;
+  will_format: boolean;
   warnings: string[];
 }
 
@@ -473,7 +474,7 @@ function perBankValue(): number | null {
 }
 
 interface WriteProgress {
-  phase: "deleting" | "writing" | "flushing";
+  phase: "formatting" | "deleting" | "writing";
   done_files: number;
   total_files: number;
   current: string;
@@ -535,7 +536,7 @@ function renderBankTable() {
     let status = "";
     let cls = "";
     if (writing && progress) {
-      if (progress.phase === "flushing" || idx < activeIdx) [status, cls] = ["done", "st-done"];
+      if (idx < activeIdx) [status, cls] = ["done", "st-done"];
       else if (idx === activeIdx) [status, cls] = [`writing ${progress.bank_done}/${progress.bank_total}`, "st-active"];
       else [status, cls] = ["pending", "st-pending"];
     }
@@ -683,8 +684,8 @@ function onWriteProgress(p: WriteProgress) {
     setBuildStatus(`Deleting existing audio… ${p.done_files + 1}/${p.total_files} · ${p.current}`, true);
     return;
   }
-  if (p.phase === "flushing") {
-    setBuildStatus("Flushing to the card… do not remove it.", true);
+  if (p.phase === "formatting") {
+    setBuildStatus("Formatting the card to clear it…", true);
     return;
   }
   const first = speedSamples[0];
@@ -729,7 +730,9 @@ async function writePlan() {
   const skipText = preview.unchanged_files > 0 ? `, skipping ${files(preview.unchanged_files)} already on the card` : "";
   const notes = preview.warnings.length > 0 ? `\n\nNote: ${preview.warnings.join(" ")}` : "";
   const message =
-    preview.delete_files > 0
+    preview.will_format
+      ? `This will FORMAT ${label}, erasing EVERYTHING on it (including any non-audio files), then ${copyText}. Continue?${notes}`
+      : preview.delete_files > 0
       ? `This will DELETE ${files(preview.delete_files)} of audio (${formatBytes(preview.delete_bytes)}) from ${label}, then ${copyText}. Other files on the card are not touched. Continue?${notes}`
       : existing === "add"
         ? `Add ${files(preview.copy_files)} (${formatBytes(preview.copy_bytes)}) to ${label}${skipText}? Audio already on the card is kept.${notes}`
@@ -737,7 +740,7 @@ async function writePlan() {
 
   let go: boolean;
   try {
-    go = await ask(message, { title: "Write to card", kind: preview.delete_files > 0 ? "warning" : "info" });
+    go = await ask(message, { title: "Write to card", kind: preview.delete_files > 0 || preview.will_format ? "warning" : "info" });
   } catch (err) {
     setBuildStatus(`Could not show the confirmation dialog: ${err}`, true);
     return;
@@ -761,11 +764,13 @@ async function writePlan() {
       preview.unchanged_files > 0 ? `skipped ${preview.unchanged_files} already there` : null,
     ].filter(Boolean);
     setBuildStatus(
-      `Wrote ${n} file${n === 1 ? "" : "s"} (${formatBytes(preview.copy_bytes)}) to ${label}${extras.length ? ` · ${extras.join(" · ")}` : ""}. Safe to eject.`,
+      `Wrote ${n} file${n === 1 ? "" : "s"} (${formatBytes(preview.copy_bytes)}) to ${label}${extras.length ? ` · ${extras.join(" · ")}` : ""}. Eject the card before unplugging it.`,
       true,
     );
     plan = null;
     renderPlan();
+    // Formatting can remount the card under a new path, so re-read the volume list first.
+    await refreshVolumes();
     await scanSelected();
   } catch (err) {
     setBuildStatus(`Error: ${err}`, true);
@@ -1001,5 +1006,8 @@ window.addEventListener("DOMContentLoaded", () => {
   updateBuildPanel();
 
   void refreshVolumes();
-  setInterval(() => void refreshVolumes(), POLL_MS);
+  // Don't poll a card while it is being written or formatted: it only adds to the load on a slow device.
+  setInterval(() => {
+    if (!writing && !formatting) void refreshVolumes();
+  }, POLL_MS);
 });
