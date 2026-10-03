@@ -18,9 +18,10 @@ interface ScanResult {
   warnings: string[];
 }
 
-function cell(text: string): HTMLTableCellElement {
+function cell(text: string, cls?: string): HTMLTableCellElement {
   const td = document.createElement("td");
   td.textContent = text;
+  if (cls) td.className = cls;
   return td;
 }
 
@@ -41,13 +42,13 @@ function render(result: ScanResult) {
         .filter(Boolean)
         .join(" ");
       tr.append(
-        cell(f.bank === null ? "root" : String(f.bank)),
+        cell(f.bank === null ? "root" : String(f.bank), "dim"),
         cell(f.relative_path),
         cell(f.tags.title ?? ""),
         cell(f.tags.artist ?? ""),
-        cell(f.duration_secs === null ? "" : `${f.duration_secs.toFixed(1)}s`),
-        cell(spec),
-        cell(f.warnings.join("; ")),
+        cell(f.duration_secs === null ? "" : `${f.duration_secs.toFixed(1)}s`, "dim"),
+        cell(spec, "dim"),
+        cell(f.warnings.join("; "), "warn"),
       );
       return tr;
     }),
