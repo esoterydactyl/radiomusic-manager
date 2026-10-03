@@ -195,3 +195,31 @@ select:focus { border-color: var(--line-strong); }
 .results th[data-sort].sorted { color: var(--ink); }
 .results th.sorted::after { content: " \2191"; }
 .results th.sorted.desc::after { content: " \2193"; }
+
+/* Build card */
+.build { margin-top: var(--sp-7); padding-top: var(--sp-4); border-top: var(--border-w) solid var(--line); }
+.build-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-5); margin-bottom: var(--sp-3); }
+.build-controls .field { display: flex; align-items: center; gap: var(--sp-2); }
+.build-controls output { min-width: 2ch; text-align: right; color: var(--ink); }
+.build-controls input[type="text"] {
+  background: var(--bg-warm);
+  color: var(--ink);
+  border: var(--border-w) solid var(--line);
+  padding: 3px var(--sp-2);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: inherit;
+  caret-color: var(--accent);
+  outline: none;
+}
+.build-controls input[aria-invalid="true"] { border-color: var(--danger); }
+.build-controls input[type="range"] { accent-color: var(--accent); width: 160px; }
+.cta:disabled { color: var(--ink-veryfaint); border-color: var(--line); cursor: default; background: transparent; }
+.build-plan { display: grid; grid-template-columns: 240px 1fr; gap: var(--sp-4); align-items: start; }
+.build-plan .results td:nth-child(3) { color: var(--ink-faint); }
+@media (max-width: 800px) { .build-plan { grid-template-columns: 1fr; } }
+
+/* Long tables scroll inside their own box so the sections below stay reachable */
+.table-scroll { max-height: 45vh; overflow: auto; min-width: 0; }
+.table-scroll.short { max-height: 25vh; }
+.table-scroll .results th { position: sticky; top: 0; background: var(--bg); z-index: 1; }

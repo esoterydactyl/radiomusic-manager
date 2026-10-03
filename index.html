@@ -18,7 +18,7 @@
       <section class="card-bar">
         <label class="label-mono" for="volume-select">Card</label>
         <select id="volume-select"></select>
-        <button type="button" class="cta" id="rescan">Rescan</button>
+        <button type="button" class="btn" id="rescan">Rescan</button>
       </section>
       <section class="options">
         <label class="check"><input type="checkbox" id="auto-select" checked /> Auto-select when one usable card is found</label>
@@ -28,14 +28,14 @@
       <ul class="warnings" id="card-warnings"></ul>
       <p class="summary" id="scan-summary"></p>
       <ul class="warnings" id="scan-warnings"></ul>
-      <table class="results">
+      <div class="table-scroll short"><table class="results">
         <thead>
           <tr>
             <th>Bank</th><th>File</th><th>Length</th><th>Format</th>
           </tr>
         </thead>
         <tbody id="scan-results"></tbody>
-      </table>
+      </table></div>
     <section class="source">
         <header class="section-head">
           <div class="eyebrow">Source library</div>
@@ -58,14 +58,43 @@
         <p class="summary" id="source-summary"></p>
         <div class="source-layout">
           <nav class="tree" id="source-tree" aria-label="Source folders"></nav>
-          <table class="results">
+          <div class="table-scroll"><table class="results">
           <thead>
             <tr>
               <th data-sort="file">File</th><th data-sort="length">Length</th><th>Format</th>
             </tr>
           </thead>
           <tbody id="source-results"></tbody>
-        </table>
+        </table></div>
+        </div>
+      </section>
+    <section class="build">
+        <header class="section-head">
+          <div class="eyebrow">Build card</div>
+        </header>
+        <div class="build-controls">
+          <label class="field"><span class="label-mono">Banks</span>
+            <input type="range" id="b-banks" min="1" max="16" value="1" />
+            <output id="b-banks-out">1</output>
+          </label>
+          <label class="field"><span class="label-mono">Files per bank</span>
+            <input type="text" id="b-per" value="250" size="4" inputmode="numeric" />
+          </label>
+          <button type="button" class="btn" id="b-roll" disabled>Roll</button>
+          <button type="button" class="cta" id="b-write" disabled>Write to card</button>
+        </div>
+        <p class="summary" id="b-pool"></p>
+        <p class="summary" id="b-status"></p>
+        <ul class="warnings" id="b-warnings"></ul>
+        <div class="build-plan">
+          <table class="results" id="b-banks-table">
+            <thead><tr><th>Bank</th><th>Files</th><th>Size</th></tr></thead>
+            <tbody id="b-banks-body"></tbody>
+          </table>
+          <div class="table-scroll short"><table class="results">
+            <thead><tr><th>Bank</th><th>Will be written as</th><th>From</th></tr></thead>
+            <tbody id="b-files-body"></tbody>
+          </table></div>
         </div>
       </section>
     </main>

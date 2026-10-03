@@ -1,9 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { compareBy, isFiltering, matches, NO_FILTERS, parseDuration, type Filters, type SortKey } from "./filters";
 
 interface AudioFileInfo {
+  path: string;
   relative_path: string;
+  size_bytes: number;
   bank: number | null;
   format: string;
   duration_secs: number | null;
@@ -149,6 +152,7 @@ function select(mount: string | null) {
   selected = mount;
   renderPicker();
   clearResults();
+  updateBuildPanel();
   if (mount) void scanSelected();
 }
 
@@ -170,6 +174,7 @@ async function refreshVolumes() {
     select(usable[0].mount_point);
   }
   renderPicker();
+  updateBuildPanel();
 }
 
 interface SourceFile extends AudioFileInfo {
@@ -257,6 +262,14 @@ function renderTreeNode(node: TreeNode, isRoot: boolean): HTMLLIElement {
   return li;
 }
 
+const inFolder = (f: SourceFile) => sourceFolder === "" || f.relative_path.startsWith(`${sourceFolder}/`);
+const passes = (f: SourceFile) => matches(f, filters);
+
+/** Files a card may be drawn from: eligible, in the selected folder, and matching the filters. */
+function poolFiles(): SourceFile[] {
+  return (sourceScan?.files ?? []).filter((f) => f.eligible && inFolder(f) && passes(f));
+}
+
 function renderSource() {
   const showIneligible = $<HTMLInputElement>("#show-ineligible").checked;
   const summary = $("#source-summary");
@@ -265,6 +278,7 @@ function renderSource() {
     summary.textContent = "";
     body.replaceChildren();
     $("#source-tree").replaceChildren();
+    updateBuildPanel();
     return;
   }
 
@@ -272,13 +286,11 @@ function renderSource() {
   if (sourceFolder !== "" && !sourceScan.files.some((f) => f.relative_path.startsWith(`${sourceFolder}/`))) {
     sourceFolder = "";
   }
-  const passes = (f: SourceFile) => matches(f, filters);
   const tree = buildTree(sourceScan.files, (f) => f.eligible && passes(f));
   const treeEl = $("#source-tree");
   const rootUl = document.createElement("ul");
   rootUl.append(renderTreeNode(tree, true));
   treeEl.replaceChildren(rootUl);
-  const inFolder = (f: SourceFile) => sourceFolder === "" || f.relative_path.startsWith(`${sourceFolder}/`);
 
   const unsupported = Object.entries(sourceScan.unsupported_by_extension);
   const unsupportedTotal = unsupported.reduce((n, [, c]) => n + c, 0);
@@ -308,6 +320,7 @@ function renderSource() {
   );
 
   syncFilterControls();
+  updateBuildPanel();
 }
 
 /** Reflect filter/sort state in the controls (clear button, sort arrows). */
@@ -380,6 +393,184 @@ async function chooseSource() {
   if (typeof picked === "string") setSourceDir(picked);
 }
 
+// ---- Build card -------------------------------------------------------------
+
+interface PlannedFile {
+  src: string;
+  dest: string;
+  size_bytes: number;
+  bank: number | null;
+}
+
+interface Plan {
+  seed: number;
+  banks: number;
+  files: PlannedFile[];
+  total_bytes: number;
+  warnings: string[];
+}
+
+let plan: Plan | null = null;
+let planPoolKey = "";
+let perBankEdited = false;
+let writing = false;
+
+const MAX_FILES_PER_BANK = 250;
+const MAX_FILES_TOTAL = 800;
+
+function poolKey(): string {
+  return poolFiles()
+    .map((f) => f.path)
+    .join("\n");
+}
+
+function selectedVolume(): Volume | undefined {
+  return volumes.find((v) => v.mount_point === selected);
+}
+
+function banksValue(): number {
+  return Number($<HTMLInputElement>("#b-banks").value);
+}
+
+/** Parses files-per-bank; null (and a red border) if it isn't a whole number from 1 to 250. */
+function perBankValue(): number | null {
+  const el = $<HTMLInputElement>("#b-per");
+  const t = el.value.trim();
+  const n = /^\d+$/.test(t) ? Number(t) : NaN;
+  const ok = n >= 1 && n <= MAX_FILES_PER_BANK;
+  el.setAttribute("aria-invalid", String(!ok));
+  return ok ? n : null;
+}
+
+function renderPlan() {
+  const banksBody = $("#b-banks-body");
+  const filesBody = $("#b-files-body");
+  $("#b-warnings").replaceChildren(
+    ...(plan?.warnings ?? []).map((w) => Object.assign(document.createElement("li"), { textContent: w })),
+  );
+  if (!plan) {
+    banksBody.replaceChildren();
+    filesBody.replaceChildren();
+    return;
+  }
+
+  const perBank = new Map<number | null, { files: number; bytes: number }>();
+  for (const f of plan.files) {
+    const e = perBank.get(f.bank) ?? { files: 0, bytes: 0 };
+    e.files++;
+    e.bytes += f.size_bytes;
+    perBank.set(f.bank, e);
+  }
+  banksBody.replaceChildren(
+    ...[...perBank.entries()].map(([bank, e]) => {
+      const tr = document.createElement("tr");
+      tr.append(cell(bank === null ? "root" : String(bank).padStart(2, "0"), "dim"), cell(String(e.files)), cell(formatBytes(e.bytes), "dim"));
+      return tr;
+    }),
+  );
+  filesBody.replaceChildren(
+    ...plan.files.map((f) => {
+      const tr = document.createElement("tr");
+      tr.append(cell(f.bank === null ? "root" : String(f.bank).padStart(2, "0"), "dim"), cell(f.dest), cell(f.src.replace(sourceDir ?? "", "").replace(/^\//, "")));
+      return tr;
+    }),
+  );
+}
+
+function updateBuildPanel() {
+  const banks = banksValue();
+  $("#b-banks-out").textContent = String(banks);
+
+  // Default files-per-bank spreads the 800-file card limit across the banks, until the user edits it.
+  if (!perBankEdited) {
+    $<HTMLInputElement>("#b-per").value = String(Math.min(MAX_FILES_PER_BANK, Math.floor(MAX_FILES_TOTAL / banks)));
+  }
+  const perBank = perBankValue();
+
+  const pool = poolFiles();
+  if (plan && poolKey() !== planPoolKey) {
+    plan = null;
+    renderPlan();
+  }
+
+  const wanted = perBank === null ? null : Math.min(banks * perBank, MAX_FILES_TOTAL);
+  $("#b-pool").textContent = !sourceScan
+    ? "Choose a source folder to draw samples from."
+    : `Pool: ${pool.length} eligible file${pool.length === 1 ? "" : "s"} (what the source table shows)` +
+      (wanted === null ? "" : ` · ${Math.min(wanted, pool.length)} will be used`);
+
+  const vol = selectedVolume();
+  const cardOk = !!vol && vol.warnings.length === 0;
+  ($("#b-roll") as HTMLButtonElement).disabled = writing || pool.length === 0 || perBank === null;
+  ($("#b-write") as HTMLButtonElement).disabled = writing || !plan || !cardOk;
+
+  if (!writing && !$("#b-status").dataset.sticky) {
+    $("#b-status").textContent = !plan
+      ? ""
+      : `${plan.files.length} files · ${formatBytes(plan.total_bytes)} · seed ${plan.seed}` +
+        (cardOk ? ` · will be written to ${vol!.name || vol!.mount_point}` : vol ? " · selected card is not usable" : " · select a card to write");
+  }
+}
+
+function setBuildStatus(text: string, sticky = false) {
+  const el = $("#b-status");
+  el.textContent = text;
+  if (sticky) el.dataset.sticky = "1";
+  else delete el.dataset.sticky;
+}
+
+async function roll() {
+  const perBank = perBankValue();
+  const pool = poolFiles();
+  if (perBank === null || pool.length === 0) return;
+  setBuildStatus("");
+  try {
+    plan = await invoke<Plan>("plan_card", {
+      candidates: pool.map((f) => ({ path: f.path, size_bytes: f.size_bytes })),
+      banks: banksValue(),
+      filesPerBank: perBank,
+      seed: crypto.getRandomValues(new Uint32Array(1))[0],
+      cardFileSystem: selectedVolume()?.file_system ?? null,
+    });
+    planPoolKey = poolKey();
+  } catch (err) {
+    plan = null;
+    setBuildStatus(`Error: ${err}`, true);
+  }
+  renderPlan();
+  updateBuildPanel();
+}
+
+async function writePlan() {
+  const vol = selectedVolume();
+  if (!plan || !vol || writing) return;
+  const label = vol.name || vol.mount_point;
+  const go = await ask(
+    `Copy ${plan.files.length} files (${formatBytes(plan.total_bytes)}) to ${label}? Existing files on the card are not touched.`,
+    { title: "Write to card", kind: "info" },
+  );
+  if (!go) return;
+
+  writing = true;
+  updateBuildPanel();
+  const unlisten = await listen<{ done: number; total: number; current: string }>("write-progress", (e) => {
+    setBuildStatus(`Writing ${e.payload.done} / ${e.payload.total} · ${e.payload.current}`, true);
+  });
+  try {
+    const n = await invoke<number>("write_card", { cardPath: vol.mount_point, plan });
+    setBuildStatus(`Wrote ${n} files to ${label}. Safe to eject.`, true);
+    plan = null;
+    renderPlan();
+    await scanSelected();
+  } catch (err) {
+    setBuildStatus(`Error: ${err}`, true);
+  } finally {
+    unlisten();
+    writing = false;
+    updateBuildPanel();
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   const prefs = loadPrefs();
   $<HTMLInputElement>("#auto-select").checked = prefs.autoSelect;
@@ -418,6 +609,19 @@ window.addEventListener("DOMContentLoaded", () => {
   } catch {
     // storage unavailable
   }
+
+  $("#b-banks").addEventListener("input", () => {
+    delete $("#b-status").dataset.sticky;
+    updateBuildPanel();
+  });
+  $("#b-per").addEventListener("input", () => {
+    perBankEdited = true;
+    delete $("#b-status").dataset.sticky;
+    updateBuildPanel();
+  });
+  $("#b-roll").addEventListener("click", () => void roll());
+  $("#b-write").addEventListener("click", () => void writePlan());
+  updateBuildPanel();
 
   void refreshVolumes();
   setInterval(() => void refreshVolumes(), POLL_MS);
