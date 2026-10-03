@@ -13,9 +13,11 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "radiomusic-manager",
-        "width": 800,
-        "height": 600
+        "title": "Radiomusic Manager",
+        "width": 1100,
+        "height": 780,
+        "minWidth": 860,
+        "minHeight": 600
       }
     ],
     "security": {

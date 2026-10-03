@@ -165,6 +165,7 @@ async function scanSelected() {
 function select(mount: string | null) {
   if (mount === selected) return;
   selected = mount;
+  lastWriteOk = false;
   $("#fmt-confirm").hidden = true;
   $<HTMLInputElement>("#fmt-typed").value = "";
   renderPicker();
@@ -429,8 +430,20 @@ interface Plan {
 
 let plan: Plan | null = null;
 let planPoolKey = "";
-let perBankEdited = false;
 let writing = false;
+let lastWriteOk = false;
+
+type Existing = "refuse" | "replace" | "add";
+const EXISTING_KEY = "radiomusic-manager:existing";
+
+interface ChangePreview {
+  delete_files: number;
+  delete_bytes: number;
+  copy_files: number;
+  copy_bytes: number;
+  unchanged_files: number;
+  warnings: string[];
+}
 
 const MAX_FILES_PER_BANK = 250;
 const MAX_FILES_TOTAL = 800;
@@ -459,18 +472,38 @@ function perBankValue(): number | null {
   return ok ? n : null;
 }
 
-function renderPlan() {
-  const banksBody = $("#b-banks-body");
-  const filesBody = $("#b-files-body");
-  $("#b-warnings").replaceChildren(
-    ...(plan?.warnings ?? []).map((w) => Object.assign(document.createElement("li"), { textContent: w })),
-  );
+interface WriteProgress {
+  phase: "deleting" | "writing" | "flushing";
+  done_files: number;
+  total_files: number;
+  current: string;
+  bank: number | null;
+  bank_done: number;
+  bank_total: number;
+  bytes_done: number;
+  bytes_total: number;
+}
+
+let progress: WriteProgress | null = null;
+
+const bankLabel = (bank: number | null) => (bank === null ? "root" : String(bank).padStart(2, "0"));
+
+/** Which bank's files the right-hand list shows: "all", "root", or a bank number as text. */
+let bankSel = "all";
+const bankKey = (bank: number | null) => (bank === null ? "root" : String(bank));
+
+function selectBank(key: string) {
+  bankSel = key;
+  renderBankTable();
+  renderFiles();
+}
+
+function renderBankTable() {
+  const body = $("#b-banks-body");
   if (!plan) {
-    banksBody.replaceChildren();
-    filesBody.replaceChildren();
+    body.replaceChildren();
     return;
   }
-
   const perBank = new Map<number | null, { files: number; bytes: number }>();
   for (const f of plan.files) {
     const e = perBank.get(f.bank) ?? { files: 0, bytes: 0 };
@@ -478,30 +511,83 @@ function renderPlan() {
     e.bytes += f.size_bytes;
     perBank.set(f.bank, e);
   }
-  banksBody.replaceChildren(
-    ...[...perBank.entries()].map(([bank, e]) => {
+  const order = [...perBank.keys()];
+  const activeIdx = progress && progress.phase === "writing" ? order.indexOf(progress.bank) : -1;
+
+  const row = (key: string, cells: HTMLTableCellElement[], extraClass = ""): HTMLTableRowElement => {
+    const tr = document.createElement("tr");
+    tr.className = `clickable ${extraClass} ${bankSel === key ? "bank-selected" : ""}`.trim();
+    tr.tabIndex = 0;
+    tr.setAttribute("aria-selected", String(bankSel === key));
+    tr.addEventListener("click", () => selectBank(key));
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        selectBank(key);
+      }
+    });
+    tr.append(...cells);
+    return tr;
+  };
+
+  const rows = order.map((bank, idx) => {
+    const e = perBank.get(bank)!;
+    let status = "";
+    let cls = "";
+    if (writing && progress) {
+      if (progress.phase === "flushing" || idx < activeIdx) [status, cls] = ["done", "st-done"];
+      else if (idx === activeIdx) [status, cls] = [`writing ${progress.bank_done}/${progress.bank_total}`, "st-active"];
+      else [status, cls] = ["pending", "st-pending"];
+    }
+    return row(
+      bankKey(bank),
+      [cell(bankLabel(bank), "dim"), cell(String(e.files)), cell(formatBytes(e.bytes), "dim"), cell(status, cls)],
+      cls === "st-active" ? "bank-active" : "",
+    );
+  });
+  // With several banks, an "All" row gets back to the full list.
+  if (order.length > 1) {
+    rows.unshift(row("all", [cell("All", "dim"), cell(String(plan.files.length)), cell(formatBytes(plan.total_bytes), "dim"), cell("")]));
+  }
+  body.replaceChildren(...rows);
+}
+
+function renderFiles() {
+  const title = $("#b-files-title");
+  const body = $("#b-files-body");
+  if (!plan) {
+    title.textContent = "";
+    body.replaceChildren();
+    return;
+  }
+  const files = bankSel === "all" ? plan.files : plan.files.filter((f) => bankKey(f.bank) === bankSel);
+  const bytes = files.reduce((n, f) => n + f.size_bytes, 0);
+  title.textContent =
+    (bankSel === "all" ? "All banks" : bankSel === "root" ? "Card root" : `Bank ${bankSel.padStart(2, "0")}`) +
+    ` · ${files.length} file${files.length === 1 ? "" : "s"} · ${formatBytes(bytes)}`;
+  body.replaceChildren(
+    ...files.map((f) => {
       const tr = document.createElement("tr");
-      tr.append(cell(bank === null ? "root" : String(bank).padStart(2, "0"), "dim"), cell(String(e.files)), cell(formatBytes(e.bytes), "dim"));
+      tr.append(cell(bankLabel(f.bank), "dim"), cell(f.dest), cell(f.src.replace(sourceDir ?? "", "").replace(/^\//, "")));
       return tr;
     }),
   );
-  filesBody.replaceChildren(
-    ...plan.files.map((f) => {
-      const tr = document.createElement("tr");
-      tr.append(cell(f.bank === null ? "root" : String(f.bank).padStart(2, "0"), "dim"), cell(f.dest), cell(f.src.replace(sourceDir ?? "", "").replace(/^\//, "")));
-      return tr;
-    }),
+}
+
+function renderPlan() {
+  $("#b-warnings").replaceChildren(
+    ...(plan?.warnings ?? []).map((w) => Object.assign(document.createElement("li"), { textContent: w })),
   );
+  // A new roll may not contain the bank that was selected.
+  if (!plan || (bankSel !== "all" && !plan.files.some((f) => bankKey(f.bank) === bankSel))) bankSel = "all";
+  renderBankTable();
+  renderFiles();
 }
 
 function updateBuildPanel() {
   const banks = banksValue();
   $("#b-banks-out").textContent = String(banks);
 
-  // Default files-per-bank spreads the 800-file card limit across the banks, until the user edits it.
-  if (!perBankEdited) {
-    $<HTMLInputElement>("#b-per").value = String(Math.min(MAX_FILES_PER_BANK, Math.floor(MAX_FILES_TOTAL / banks)));
-  }
   const perBank = perBankValue();
 
   const pool = poolFiles();
@@ -512,9 +598,9 @@ function updateBuildPanel() {
 
   const wanted = perBank === null ? null : Math.min(banks * perBank, MAX_FILES_TOTAL);
   $("#b-pool").textContent = !sourceScan
-    ? "Choose a source folder to draw samples from."
-    : `Pool: ${pool.length} eligible file${pool.length === 1 ? "" : "s"} (what the source table shows)` +
-      (wanted === null ? "" : ` · ${Math.min(wanted, pool.length)} will be used`);
+    ? "Choose a source folder in step 2 to draw samples from."
+    : `${pool.length} eligible file${pool.length === 1 ? "" : "s"}` +
+      (wanted === null ? "" : ` / ${Math.min(wanted, pool.length)} used`);
 
   const vol = selectedVolume();
   const cardOk = !!vol && vol.warnings.length === 0;
@@ -523,12 +609,14 @@ function updateBuildPanel() {
 
   // Say why Write is unavailable instead of leaving a silently dimmed button.
   let reason = "";
-  if (!sourceScan) reason = "Choose a source folder first";
+  if (!sourceScan) reason = "Choose a source folder in step 2";
   else if (pool.length === 0) reason = "No eligible files in the pool";
   else if (!plan) reason = "Press Roll to pick a random selection";
-  else if (!vol) reason = "Select a card above";
+  else if (!vol) reason = "Select a card in step 1";
   else if (!cardOk) reason = "The selected card is not usable";
   ($("#b-write") as HTMLButtonElement).title = reason;
+  updateTabs();
+  ($("#b-cancel") as HTMLElement).hidden = !writing;
   updateFormatPanel();
 
   if (!writing && !$("#b-status").dataset.sticky) {
@@ -549,6 +637,7 @@ function setBuildStatus(text: string, sticky = false) {
 }
 
 async function roll() {
+  lastWriteOk = false;
   const perBank = perBankValue();
   const pool = poolFiles();
   if (perBank === null || pool.length === 0) return;
@@ -570,16 +659,85 @@ async function roll() {
   updateBuildPanel();
 }
 
+/** Recent (time, bytes) samples used to estimate speed over a sliding window. */
+const speedSamples: { t: number; bytes: number }[] = [];
+const SPEED_WINDOW_MS = 6000;
+
+function formatDuration(secs: number): string {
+  if (!isFinite(secs) || secs < 0) return "…";
+  if (secs < 60) return `${Math.max(1, Math.round(secs))}s`;
+  const m = Math.round(secs / 60);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function onWriteProgress(p: WriteProgress) {
+  progress = p;
+  const now = performance.now();
+  speedSamples.push({ t: now, bytes: p.bytes_done });
+  while (speedSamples.length > 2 && now - speedSamples[0].t > SPEED_WINDOW_MS) speedSamples.shift();
+
+  ($("#b-bar") as HTMLElement).style.width = `${p.bytes_total ? (100 * p.bytes_done) / p.bytes_total : 0}%`;
+  renderBankTable();
+
+  if (p.phase === "deleting") {
+    setBuildStatus(`Deleting existing audio… ${p.done_files + 1}/${p.total_files} · ${p.current}`, true);
+    return;
+  }
+  if (p.phase === "flushing") {
+    setBuildStatus("Flushing to the card… do not remove it.", true);
+    return;
+  }
+  const first = speedSamples[0];
+  const dt = (now - first.t) / 1000;
+  const speed = dt > 0.5 ? (p.bytes_done - first.bytes) / dt : 0;
+  const eta = speed > 0 ? (p.bytes_total - p.bytes_done) / speed : NaN;
+  setBuildStatus(
+    [
+      `Bank ${bankLabel(p.bank)}`,
+      `file ${Math.min(p.done_files + 1, p.total_files)}/${p.total_files}`,
+      `${formatBytes(p.bytes_done)} / ${formatBytes(p.bytes_total)}`,
+      speed > 0 ? `${(speed / 1e6).toFixed(1)} MB/s` : null,
+      speed > 0 ? `~${formatDuration(eta)} left` : null,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    true,
+  );
+}
+
 async function writePlan() {
   const vol = selectedVolume();
   if (!plan || !vol || writing) return;
   const label = vol.name || vol.mount_point;
+  const existing = $<HTMLSelectElement>("#b-existing").value as Existing;
+
+  // Ask the backend exactly what this would do before anything is touched.
+  let preview: ChangePreview;
+  try {
+    preview = await invoke<ChangePreview>("preview_card_changes", { cardPath: vol.mount_point, plan, existing });
+  } catch (err) {
+    setBuildStatus(`Error: ${err}`, true);
+    return;
+  }
+  if (preview.copy_files === 0 && preview.delete_files === 0) {
+    setBuildStatus(`${label} already matches this selection. Nothing to do.`, true);
+    return;
+  }
+
+  const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+  const copyText = `copy ${files(preview.copy_files)} (${formatBytes(preview.copy_bytes)})`;
+  const skipText = preview.unchanged_files > 0 ? `, skipping ${files(preview.unchanged_files)} already on the card` : "";
+  const notes = preview.warnings.length > 0 ? `\n\nNote: ${preview.warnings.join(" ")}` : "";
+  const message =
+    preview.delete_files > 0
+      ? `This will DELETE ${files(preview.delete_files)} of audio (${formatBytes(preview.delete_bytes)}) from ${label}, then ${copyText}. Other files on the card are not touched. Continue?${notes}`
+      : existing === "add"
+        ? `Add ${files(preview.copy_files)} (${formatBytes(preview.copy_bytes)}) to ${label}${skipText}? Audio already on the card is kept.${notes}`
+        : `Copy ${files(preview.copy_files)} (${formatBytes(preview.copy_bytes)}) to ${label}? Existing files on the card are not touched.${notes}`;
+
   let go: boolean;
   try {
-    go = await ask(
-      `Copy ${plan.files.length} files (${formatBytes(plan.total_bytes)}) to ${label}? Existing files on the card are not touched.`,
-      { title: "Write to card", kind: "info" },
-    );
+    go = await ask(message, { title: "Write to card", kind: preview.delete_files > 0 ? "warning" : "info" });
   } catch (err) {
     setBuildStatus(`Could not show the confirmation dialog: ${err}`, true);
     return;
@@ -591,12 +749,21 @@ async function writePlan() {
 
   writing = true;
   updateBuildPanel();
-  const unlisten = await listen<{ done: number; total: number; current: string }>("write-progress", (e) => {
-    setBuildStatus(`Writing ${e.payload.done} / ${e.payload.total} · ${e.payload.current}`, true);
-  });
+  progress = null;
+  speedSamples.length = 0;
+  ($("#b-progress") as HTMLElement).hidden = false;
+  const unlisten = await listen<WriteProgress>("write-progress", (e) => onWriteProgress(e.payload));
   try {
-    const n = await invoke<number>("write_card", { cardPath: vol.mount_point, plan });
-    setBuildStatus(`Wrote ${n} files to ${label}. Safe to eject.`, true);
+    const n = await invoke<number>("write_card", { cardPath: vol.mount_point, plan, existing });
+    lastWriteOk = true;
+    const extras = [
+      preview.delete_files > 0 ? `deleted ${preview.delete_files}` : null,
+      preview.unchanged_files > 0 ? `skipped ${preview.unchanged_files} already there` : null,
+    ].filter(Boolean);
+    setBuildStatus(
+      `Wrote ${n} file${n === 1 ? "" : "s"} (${formatBytes(preview.copy_bytes)}) to ${label}${extras.length ? ` · ${extras.join(" · ")}` : ""}. Safe to eject.`,
+      true,
+    );
     plan = null;
     renderPlan();
     await scanSelected();
@@ -605,6 +772,10 @@ async function writePlan() {
   } finally {
     unlisten();
     writing = false;
+    progress = null;
+    ($("#b-progress") as HTMLElement).hidden = true;
+    ($("#b-bar") as HTMLElement).style.width = "0";
+    renderBankTable();
     updateBuildPanel();
   }
 }
@@ -697,7 +868,66 @@ async function formatSelected() {
   }
 }
 
+// ---- Workflow tabs ----------------------------------------------------------
+
+type Step = "card" | "files" | "build";
+const STEPS: Step[] = ["card", "files", "build"];
+
+function showStep(step: Step, focus = false) {
+  for (const s of STEPS) {
+    const on = s === step;
+    const tab = $(`#tab-${s}`);
+    tab.setAttribute("aria-selected", String(on));
+    tab.tabIndex = on ? 0 : -1;
+    $(`#panel-${s}`).hidden = !on;
+  }
+  if (focus) $(`#tab-${step}`).focus();
+  if (step === "build") updateBuildPanel();
+}
+
+function setStepState(step: Step, meta: string, state: "todo" | "done" | "warn") {
+  $(`#meta-${step}`).textContent = meta;
+  $(`#dot-${step}`).dataset.state = state;
+  $(`#tab-${step}`).classList.toggle("done", state === "done");
+}
+
+/** Summarise each step on its tab so the workflow's progress is visible from anywhere. */
+function updateTabs() {
+  const vol = selectedVolume();
+  setStepState(
+    "card",
+    vol ? `${vol.name || vol.mount_point} · ${vol.file_system || "?"}` : "No card",
+    !vol ? "todo" : vol.warnings.length > 0 ? "warn" : "done",
+  );
+
+  const pool = poolFiles().length;
+  setStepState("files", sourceScan ? `${pool} eligible file${pool === 1 ? "" : "s"}` : "No folder", pool > 0 ? "done" : "todo");
+
+  setStepState(
+    "build",
+    lastWriteOk ? "Card written" : plan ? `${plan.files.length} files rolled` : "Not built",
+    lastWriteOk ? "done" : "todo",
+  );
+}
+
+function wireTabs() {
+  STEPS.forEach((s, idx) => {
+    const tab = $(`#tab-${s}`);
+    tab.addEventListener("click", () => showStep(s));
+    tab.addEventListener("keydown", (e: KeyboardEvent) => {
+      const next = e.key === "ArrowRight" ? idx + 1 : e.key === "ArrowLeft" ? idx - 1 : e.key === "Home" ? 0 : e.key === "End" ? STEPS.length - 1 : null;
+      if (next === null) return;
+      e.preventDefault();
+      showStep(STEPS[(next + STEPS.length) % STEPS.length], true);
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-goto]").forEach((b) =>
+    b.addEventListener("click", () => showStep(b.dataset.goto as Step, true)),
+  );
+}
+
 window.addEventListener("DOMContentLoaded", () => {
+  wireTabs();
   const prefs = loadPrefs();
   $<HTMLInputElement>("#auto-select").checked = prefs.autoSelect;
   $<HTMLInputElement>("#show-all").checked = prefs.showAll;
@@ -741,7 +971,6 @@ window.addEventListener("DOMContentLoaded", () => {
     updateBuildPanel();
   });
   $("#b-per").addEventListener("input", () => {
-    perBankEdited = true;
     delete $("#b-status").dataset.sticky;
     updateBuildPanel();
   });
@@ -750,8 +979,25 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#fmt-typed").addEventListener("input", updateFormatPanel);
   $("#fmt-cancel").addEventListener("click", closeFormatConfirm);
   $("#fmt-go").addEventListener("click", () => void formatSelected());
+  try {
+    const saved = localStorage.getItem(EXISTING_KEY);
+    if (saved === "refuse" || saved === "replace" || saved === "add") $<HTMLSelectElement>("#b-existing").value = saved;
+  } catch {
+    // storage unavailable; the mode just won't be remembered
+  }
+  $("#b-existing").addEventListener("change", () => {
+    try {
+      localStorage.setItem(EXISTING_KEY, $<HTMLSelectElement>("#b-existing").value);
+    } catch {
+      // ignore
+    }
+  });
   $("#b-roll").addEventListener("click", () => void roll());
   $("#b-write").addEventListener("click", () => void writePlan());
+  $("#b-cancel").addEventListener("click", () => {
+    setBuildStatus("Cancelling after the current chunk…", true);
+    void invoke("cancel_write");
+  });
   updateBuildPanel();
 
   void refreshVolumes();

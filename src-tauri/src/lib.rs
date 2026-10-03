@@ -44,10 +44,15 @@ fn plan_card(
 
 /// Copies a plan onto the card at `card_path`, emitting `write-progress` events.
 #[tauri::command]
-async fn write_card(app: tauri::AppHandle, card_path: String, plan: card::Plan) -> Result<usize, String> {
+async fn write_card(
+    app: tauri::AppHandle,
+    card_path: String,
+    plan: card::Plan,
+    existing: card::Existing,
+) -> Result<usize, String> {
     use tauri::Emitter;
     tauri::async_runtime::spawn_blocking(move || {
-        card::write(std::path::Path::new(&card_path), &plan, |p| {
+        card::write(std::path::Path::new(&card_path), &plan, existing, |p| {
             let _ = app.emit("write-progress", p);
         })
     })
@@ -71,12 +76,30 @@ async fn format_card(mount_point: String, label: String) -> Result<String, Strin
     .map_err(|e| e.to_string())?
 }
 
+/// Describes what writing `plan` would delete, copy and leave alone, without changing the card.
+#[tauri::command]
+async fn preview_card_changes(
+    card_path: String,
+    plan: card::Plan,
+    existing: card::Existing,
+) -> Result<card::ChangePreview, String> {
+    tauri::async_runtime::spawn_blocking(move || card::preview(std::path::Path::new(&card_path), &plan, existing))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Stops a running `write_card` after the current chunk, removing the partly written file.
+#[tauri::command]
+fn cancel_write() {
+    card::request_cancel();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![list_volumes, scan_directory, scan_source, plan_card, write_card, format_card])
+        .invoke_handler(tauri::generate_handler![list_volumes, scan_directory, scan_source, plan_card, write_card, preview_card_changes, cancel_write, format_card])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -64,7 +64,7 @@ pub struct ScanResult {
 }
 
 /// Leading digits of a folder name (`"05 shortwave"` -> 5), if a valid bank 0-15.
-fn bank_from_folder(name: &str) -> Option<u8> {
+pub(crate) fn bank_from_folder(name: &str) -> Option<u8> {
     let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
     let n: u8 = digits.parse().ok()?;
     (usize::from(n) < MAX_BANKS).then_some(n)

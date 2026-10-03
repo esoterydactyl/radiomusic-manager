@@ -13,9 +13,29 @@
     <main class="app">
       <header class="masthead">
         <div class="wordmark">Radiomusic <span class="e">Manager</span></div>
-        <div class="eyebrow">Music Thing Modular &middot; Radio Music card</div>
+        <div class="eyebrow">From Ecotone Labs</div>
       </header>
-      <section class="card-bar">
+
+      <nav class="steps" role="tablist" aria-label="Workflow">
+        <button type="button" class="step" role="tab" id="tab-card" aria-controls="panel-card" aria-selected="true" data-step="card">
+          <span class="step-num">01</span>
+          <span class="step-body"><span class="step-title">Select Card</span><span class="step-meta" id="meta-card">No card</span></span>
+          <span class="step-dot" id="dot-card" data-state="todo"></span>
+        </button>
+        <button type="button" class="step" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1" data-step="files">
+          <span class="step-num">02</span>
+          <span class="step-body"><span class="step-title">Select Files</span><span class="step-meta" id="meta-files">No folder</span></span>
+          <span class="step-dot" id="dot-files" data-state="todo"></span>
+        </button>
+        <button type="button" class="step" role="tab" id="tab-build" aria-controls="panel-build" aria-selected="false" tabindex="-1" data-step="build">
+          <span class="step-num">03</span>
+          <span class="step-body"><span class="step-title">Build Card</span><span class="step-meta" id="meta-build">Not built</span></span>
+          <span class="step-dot" id="dot-build" data-state="todo"></span>
+        </button>
+      </nav>
+
+      <section class="panel" role="tabpanel" id="panel-card" aria-labelledby="tab-card">
+        <section class="card-bar">
         <label class="label-mono" for="volume-select">Card</label>
         <select id="volume-select"></select>
         <button type="button" class="btn" id="rescan">Rescan</button>
@@ -26,7 +46,23 @@
       </section>
       <p class="card-info" id="card-info"></p>
       <ul class="warnings" id="card-warnings"></ul>
-      <p class="summary" id="scan-summary"></p>
+        <div class="format-bar">
+          <span class="label-mono">Card format</span>
+          <span class="format-info" id="fmt-info">No card selected</span>
+          <label class="field"><span class="label-mono">Label</span>
+            <input type="text" id="fmt-label" value="RADIOMUSIC" size="12" maxlength="11" spellcheck="false" autocomplete="off" />
+          </label>
+          <button type="button" class="btn danger" id="fmt-open" disabled>Format card…</button>
+        </div>
+        <div class="format-confirm" id="fmt-confirm" hidden>
+          <p id="fmt-warning"></p>
+          <div class="format-confirm-row">
+            <input type="text" id="fmt-typed" size="16" spellcheck="false" autocomplete="off" />
+            <button type="button" class="btn danger" id="fmt-go" disabled>Erase and format</button>
+            <button type="button" class="btn" id="fmt-cancel">Cancel</button>
+          </div>
+        </div>
+        <p class="summary" id="scan-summary"></p>
       <ul class="warnings" id="scan-warnings"></ul>
       <div class="table-scroll short"><table class="results">
         <thead>
@@ -36,10 +72,13 @@
         </thead>
         <tbody id="scan-results"></tbody>
       </table></div>
-    <section class="source">
-        <header class="section-head">
-          <div class="eyebrow">Source library</div>
-        </header>
+        <div class="panel-nav">
+          <span></span>
+          <button type="button" class="btn" data-goto="files">Next: Select Files &rarr;</button>
+        </div>
+      </section>
+
+      <section class="panel" role="tabpanel" id="panel-files" aria-labelledby="tab-files" hidden>
         <div class="card-bar">
           <button type="button" class="btn" id="choose-source">Choose folder…</button>
           <span class="path" id="source-path">No folder selected</span>
@@ -67,27 +106,13 @@
           <tbody id="source-results"></tbody>
         </table></div>
         </div>
+        <div class="panel-nav">
+          <button type="button" class="btn" data-goto="card">&larr; Select Card</button>
+          <button type="button" class="btn" data-goto="build">Next: Build Card &rarr;</button>
+        </div>
       </section>
-    <section class="build">
-        <header class="section-head">
-          <div class="eyebrow">Build card</div>
-        </header>
-        <div class="format-bar">
-          <span class="label-mono">Card format</span>
-          <span class="format-info" id="fmt-info">No card selected</span>
-          <label class="field"><span class="label-mono">Label</span>
-            <input type="text" id="fmt-label" value="RADIOMUSIC" size="12" maxlength="11" spellcheck="false" autocomplete="off" />
-          </label>
-          <button type="button" class="btn danger" id="fmt-open" disabled>Format card…</button>
-        </div>
-        <div class="format-confirm" id="fmt-confirm" hidden>
-          <p id="fmt-warning"></p>
-          <div class="format-confirm-row">
-            <input type="text" id="fmt-typed" size="16" spellcheck="false" autocomplete="off" />
-            <button type="button" class="btn danger" id="fmt-go" disabled>Erase and format</button>
-            <button type="button" class="btn" id="fmt-cancel">Cancel</button>
-          </div>
-        </div>
+
+      <section class="panel" role="tabpanel" id="panel-build" aria-labelledby="tab-build" hidden>
         <div class="build-controls">
           <label class="field"><span class="label-mono">Banks</span>
             <input type="range" id="b-banks" min="1" max="16" value="1" />
@@ -96,21 +121,37 @@
           <label class="field"><span class="label-mono">Files per bank</span>
             <input type="text" id="b-per" value="250" size="4" inputmode="numeric" />
           </label>
+          <label class="field"><span class="label-mono">If card has audio</span>
+            <select id="b-existing">
+              <option value="refuse">Stop</option>
+              <option value="replace">Erase Existing Audio</option>
+              <option value="add">Add new files</option>
+            </select>
+          </label>
           <button type="button" class="btn" id="b-roll" disabled>Roll</button>
           <button type="button" class="cta" id="b-write" disabled>Write to card</button>
+          <button type="button" class="btn danger" id="b-cancel" hidden>Cancel</button>
         </div>
+        <div class="progress" id="b-progress" hidden><div class="progress-fill" id="b-bar"></div></div>
         <p class="summary" id="b-pool"></p>
         <p class="summary" id="b-status"></p>
         <ul class="warnings" id="b-warnings"></ul>
         <div class="build-plan">
-          <table class="results" id="b-banks-table">
-            <thead><tr><th>Bank</th><th>Files</th><th>Size</th></tr></thead>
+          <table class="results" id="b-banks-table" aria-label="Banks">
+            <thead><tr><th>Bank</th><th>Files</th><th>Size</th><th>Status</th></tr></thead>
             <tbody id="b-banks-body"></tbody>
           </table>
-          <div class="table-scroll short"><table class="results">
-            <thead><tr><th>Bank</th><th>Will be written as</th><th>From</th></tr></thead>
-            <tbody id="b-files-body"></tbody>
-          </table></div>
+          <div class="build-files">
+            <p class="summary" id="b-files-title"></p>
+            <div class="table-scroll"><table class="results">
+              <thead><tr><th>Bank</th><th>Will be written as</th><th>From</th></tr></thead>
+              <tbody id="b-files-body"></tbody>
+            </table></div>
+          </div>
+        </div>
+        <div class="panel-nav">
+          <button type="button" class="btn" data-goto="files">&larr; Select Files</button>
+          <span></span>
         </div>
       </section>
     </main>

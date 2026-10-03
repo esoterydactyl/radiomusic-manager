@@ -121,7 +121,6 @@ select:focus { border-color: var(--line-strong); }
 .results tr:hover td { background: var(--bg-2); }
 .results td.dim { color: var(--ink-faint); }
 
-.source { margin-top: var(--sp-7); padding-top: var(--sp-4); border-top: var(--border-w) solid var(--line); }
 .section-head { margin-bottom: var(--sp-4); }
 .path { flex: 1; color: var(--ink-faint); font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -147,7 +146,7 @@ select:focus { border-color: var(--line-strong); }
 .tree {
   border: var(--border-w) solid var(--line);
   background: var(--bg-warm);
-  max-height: 60vh;
+  max-height: 56vh;
   overflow: auto;
   padding: var(--sp-1) 0;
   font-size: 12px;
@@ -197,7 +196,6 @@ select:focus { border-color: var(--line-strong); }
 .results th.sorted.desc::after { content: " \2193"; }
 
 /* Build card */
-.build { margin-top: var(--sp-7); padding-top: var(--sp-4); border-top: var(--border-w) solid var(--line); }
 .build-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-5); margin-bottom: var(--sp-3); }
 .build-controls .field { display: flex; align-items: center; gap: var(--sp-2); }
 .build-controls output { min-width: 2ch; text-align: right; color: var(--ink); }
@@ -215,13 +213,13 @@ select:focus { border-color: var(--line-strong); }
 .build-controls input[aria-invalid="true"] { border-color: var(--danger); }
 .build-controls input[type="range"] { accent-color: var(--accent); width: 160px; }
 .cta:disabled { color: var(--ink-veryfaint); border-color: var(--line); cursor: default; background: transparent; }
-.build-plan { display: grid; grid-template-columns: 240px 1fr; gap: var(--sp-4); align-items: start; }
+.build-plan { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
 .build-plan .results td:nth-child(3) { color: var(--ink-faint); }
 @media (max-width: 800px) { .build-plan { grid-template-columns: 1fr; } }
 
 /* Long tables scroll inside their own box so the sections below stay reachable */
-.table-scroll { max-height: 45vh; overflow: auto; min-width: 0; }
-.table-scroll.short { max-height: 25vh; }
+.table-scroll { max-height: 56vh; overflow: auto; min-width: 0; }
+.table-scroll.short { max-height: 34vh; }
 .table-scroll .results th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
 
 /* Card format */
@@ -252,3 +250,111 @@ select:focus { border-color: var(--line-strong); }
 .format-confirm[hidden] { display: none; }
 .format-confirm p { margin: 0 0 var(--sp-3); font-size: 12px; color: var(--ink); }
 .format-confirm-row { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
+
+/* Write progress */
+.progress { height: 4px; background: var(--bg-3); margin: 0 0 var(--sp-3); }
+.progress[hidden], #b-cancel[hidden] { display: none; }
+.progress-fill { height: 100%; width: 0; background: var(--alive); transition: width var(--t-med) var(--ease); }
+.results td.st-done { color: var(--alive); }
+.results td.st-active { color: var(--ink); }
+.results td.st-pending { color: var(--ink-dim); }
+.results tr.bank-active td { background: var(--bg-3); }
+
+.build-controls select { flex: none; padding: 3px var(--sp-2); font-size: 12px; }
+
+/* Workflow steps (tabs) */
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  margin-bottom: var(--sp-5);
+}
+.step {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  text-align: left;
+  background: transparent;
+  color: var(--ink-faint);
+  border: 0;
+  border-bottom: 2px solid var(--line);
+  padding: var(--sp-3) var(--sp-5) var(--sp-3) var(--sp-2);
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.step:hover { color: var(--ink); background: var(--bg-2); }
+.step:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+.step[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+.step.done:not([aria-selected="true"]) { border-bottom-color: var(--alive-dim); }
+
+/* A chevron between steps reads as "next" */
+.step:not(:last-child)::after {
+  content: "\203A";
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-55%);
+  font-size: 22px;
+  line-height: 1;
+  color: var(--ink-dim);
+}
+
+.step-num {
+  font-family: var(--mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: var(--tracking-tag);
+  color: var(--ink-dim);
+}
+.step[aria-selected="true"] .step-num { color: var(--ink); }
+.step-body { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 2px; }
+.step-title {
+  font-size: var(--fs-eyebrow);
+  letter-spacing: var(--tracking-tag);
+  text-transform: uppercase;
+}
+.step-meta {
+  font-size: var(--fs-meta);
+  color: var(--ink-faint);
+  letter-spacing: var(--tracking-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.step-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-dot);
+  border: var(--border-w) solid var(--ink-dim);
+  margin-right: var(--sp-2);
+}
+.step-dot[data-state="done"] { background: var(--alive); border-color: var(--alive); }
+.step-dot[data-state="warn"] { background: var(--warn); border-color: var(--warn); }
+
+.panel[hidden] { display: none; }
+.panel-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-3);
+  border-top: var(--border-w) solid var(--line);
+}
+@media (max-width: 760px) {
+  .step { padding-right: var(--sp-4); }
+  .step-meta { display: none; }
+}
+
+/* Build: pick a bank on the left to list its files on the right */
+.results tr.clickable { cursor: pointer; }
+.results tr.clickable:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+.results tr.bank-selected td { background: var(--accent-faint); color: var(--ink); }
+.build-files .summary { margin-top: 0; }
+
+/* Banks table sizes to its content so values like "128.1 GB" and "writing 250/250" never truncate */
+#b-banks-table td { max-width: none; overflow: visible; text-overflow: clip; }
+#b-banks-table th:nth-child(2), #b-banks-table td:nth-child(2) { min-width: 5ch; }
+#b-banks-table th:nth-child(3), #b-banks-table td:nth-child(3) { min-width: 10ch; white-space: nowrap; }
