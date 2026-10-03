@@ -51,9 +51,13 @@ body::before {
   color: var(--ink-faint);
 }
 
-.scan-form { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.card-bar { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-3); }
+.options { display: flex; gap: var(--sp-5); margin-bottom: var(--sp-4); }
+.check { display: flex; align-items: center; gap: var(--sp-2); color: var(--ink-faint); font-size: var(--fs-meta); cursor: pointer; }
+.check input { flex: none; accent-color: var(--accent); }
+.card-info { color: var(--ink-faint); font-size: var(--fs-meta); margin: 0 0 var(--sp-3); }
 
-input {
+select {
   flex: 1;
   background: var(--bg-warm);
   color: var(--ink);
@@ -61,12 +65,10 @@ input {
   padding: var(--sp-2) var(--sp-3);
   font: inherit;
   letter-spacing: inherit;
-  caret-color: var(--accent);
   outline: none;
-  transition: border-color var(--t-fast) var(--ease);
 }
-input::placeholder { color: var(--ink-dim); }
-input:focus { border-color: var(--line-strong); }
+select:focus { border-color: var(--line-strong); }
+
 
 /* The single rationed accent CTA */
 .cta {

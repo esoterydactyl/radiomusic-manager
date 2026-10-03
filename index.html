@@ -15,11 +15,17 @@
         <div class="wordmark">Radiomusic <span class="e">Manager</span></div>
         <div class="eyebrow">Music Thing Modular &middot; Radio Music card</div>
       </header>
-      <form class="scan-form" id="scan-form">
-        <label class="label-mono" for="scan-path">Card path</label>
-        <input id="scan-path" placeholder="/Volumes/SDCARD" spellcheck="false" autocomplete="off" />
-        <button type="submit" class="cta">Scan</button>
-      </form>
+      <section class="card-bar">
+        <label class="label-mono" for="volume-select">Card</label>
+        <select id="volume-select"></select>
+        <button type="button" class="cta" id="rescan">Rescan</button>
+      </section>
+      <section class="options">
+        <label class="check"><input type="checkbox" id="auto-select" checked /> Auto-select when one usable card is found</label>
+        <label class="check"><input type="checkbox" id="show-all" /> Show non-removable volumes</label>
+      </section>
+      <p class="card-info" id="card-info"></p>
+      <ul class="warnings" id="card-warnings"></ul>
       <p class="summary" id="scan-summary"></p>
       <ul class="warnings" id="scan-warnings"></ul>
       <table class="results">
