@@ -100,18 +100,75 @@ select:focus { border-color: var(--line-strong); }
 .results th {
   text-align: left;
   font-weight: 400;
-  font-size: var(--fs-eyebrow);
+  font-size: 9.5px;
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
   color: var(--ink-faint);
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-1) var(--sp-2);
   border-bottom: var(--border-w) solid var(--line-strong);
 }
 .results td {
-  padding: var(--sp-2) var(--sp-3);
+  padding: 1px var(--sp-2);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
   border-bottom: var(--border-w) solid var(--line);
   color: var(--ink);
 }
 .results tr:hover td { background: var(--bg-2); }
 .results td.dim { color: var(--ink-faint); }
 .results td.warn { color: var(--warn); }
+
+.source { margin-top: var(--sp-7); padding-top: var(--sp-4); border-top: var(--border-w) solid var(--line); }
+.section-head { margin-bottom: var(--sp-4); }
+.path { flex: 1; color: var(--ink-faint); font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Secondary button: hairline, no accent (the accent is reserved for the one CTA) */
+.btn {
+  background: transparent;
+  color: var(--ink);
+  border: var(--border-w) solid var(--line-strong);
+  padding: var(--sp-2) var(--sp-4);
+  font: inherit;
+  font-size: var(--fs-eyebrow);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.btn:hover:not(:disabled) { background: var(--bg-3); }
+.btn:disabled { color: var(--ink-veryfaint); border-color: var(--line); cursor: default; }
+.results tr.ineligible td { color: var(--ink-dim); }
+
+/* Source library: folder tree beside the file table */
+.source-layout { display: grid; grid-template-columns: 260px 1fr; gap: var(--sp-4); align-items: start; }
+.tree {
+  border: var(--border-w) solid var(--line);
+  background: var(--bg-warm);
+  max-height: 60vh;
+  overflow: auto;
+  padding: var(--sp-1) 0;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.tree ul { list-style: none; margin: 0; padding: 0; }
+.tree ul ul { margin-left: var(--sp-4); }
+.tree .row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-2);
+  cursor: pointer;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.tree .row:hover { background: var(--bg-2); }
+.tree .row.selected { background: var(--accent-faint); }
+.tree .row.empty { color: var(--ink-dim); }
+.tree .twisty { width: 1ch; flex: none; color: var(--ink-faint); }
+.tree .name { overflow: hidden; text-overflow: ellipsis; }
+.tree .count { margin-left: auto; padding-left: var(--sp-2); color: var(--ink-faint); font-size: 11px; }
+@media (max-width: 800px) { .source-layout { grid-template-columns: 1fr; } }

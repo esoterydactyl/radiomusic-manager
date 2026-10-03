@@ -9,4 +9,5 @@
  5. As a user, I want to use my pool of filtered sounds to build a randomized SD card for the musicthing radiomusic. 
  6. As a user, I want to quickly choose how many folders to include on my sd card, so that I can have the desired configuration.
  7. As a user, I want the option to normalize all files used on my card, so that I can avoid dramatic differences in volumes. 
- 
+ 8. As a user, I want to preview audio files before I assign them to a folder on the radiomusic card, so I can be sure about what I'm adding. 
+ 9. As a user, I want to define a start and end to audio samples before I load them on to the radiomusic card, so I can more gracefully handle large files without making numerous local copies. 

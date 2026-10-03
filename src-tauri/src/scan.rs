@@ -28,7 +28,7 @@ pub enum Format {
 }
 
 impl Format {
-    fn from_path(path: &Path) -> Option<Self> {
+    pub(crate) fn from_path(path: &Path) -> Option<Self> {
         match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
             "wav" => Some(Self::Wav),
             "aif" | "aiff" => Some(Self::Aiff),
@@ -80,11 +80,11 @@ fn bank_from_folder(name: &str) -> Option<u8> {
 }
 
 /// Files and folders starting with `.` or `_` are ignored by the firmware.
-fn is_hidden(name: &str) -> bool {
+pub(crate) fn is_hidden(name: &str) -> bool {
     name.starts_with('.') || name.starts_with('_')
 }
 
-fn read_file(root: &Path, path: &Path, format: Format, bank: Option<u8>) -> AudioFileInfo {
+pub(crate) fn read_file(root: &Path, path: &Path, format: Format, bank: Option<u8>) -> AudioFileInfo {
     let relative_path = path
         .strip_prefix(root)
         .unwrap_or(path)
@@ -140,6 +140,12 @@ fn read_file(root: &Path, path: &Path, format: Format, bank: Option<u8>) -> Audi
             info.warnings.push(format!(
                 "Sample rate {rate} Hz is outside the supported {MIN_SAMPLE_RATE}-{MAX_SAMPLE_RATE} Hz range"
             ));
+        }
+    }
+    if let Some(ch) = info.channels {
+        if ch > 2 {
+            info.warnings
+                .push(format!("{ch} channels; only mono or stereo files are supported"));
         }
     }
     if let Some(depth) = info.bit_depth {

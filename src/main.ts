@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 interface AudioFileInfo {
   relative_path: string;
@@ -21,8 +22,15 @@ interface ScanResult {
 function cell(text: string, cls?: string): HTMLTableCellElement {
   const td = document.createElement("td");
   td.textContent = text;
+  td.title = text; // full text on hover when the cell is truncated
   if (cls) td.className = cls;
   return td;
+}
+
+function specString(f: AudioFileInfo): string {
+  return [f.sample_rate && `${f.sample_rate} Hz`, f.bit_depth && `${f.bit_depth}-bit`, f.channels && `${f.channels}ch`]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function render(result: ScanResult) {
@@ -38,16 +46,13 @@ function render(result: ScanResult) {
   table.replaceChildren(
     ...result.files.map((f) => {
       const tr = document.createElement("tr");
-      const spec = [f.sample_rate && `${f.sample_rate} Hz`, f.bit_depth && `${f.bit_depth}-bit`, f.channels && `${f.channels}ch`]
-        .filter(Boolean)
-        .join(" ");
       tr.append(
         cell(f.bank === null ? "root" : String(f.bank), "dim"),
         cell(f.relative_path),
         cell(f.tags.title ?? ""),
         cell(f.tags.artist ?? ""),
         cell(f.duration_secs === null ? "" : `${f.duration_secs.toFixed(1)}s`, "dim"),
-        cell(spec, "dim"),
+        cell(specString(f), "dim"),
         cell(f.warnings.join("; "), "warn"),
       );
       return tr;
@@ -66,6 +71,7 @@ interface Volume {
 }
 
 const POLL_MS = 2000;
+const SOURCE_KEY = "radiomusic-manager:source";
 const PREFS_KEY = "radiomusic-manager:prefs";
 
 let volumes: Volume[] = [];
@@ -168,6 +174,174 @@ async function refreshVolumes() {
   renderPicker();
 }
 
+interface SourceFile extends AudioFileInfo {
+  eligible: boolean;
+}
+
+interface SourceScan {
+  files: SourceFile[];
+  eligible_count: number;
+  unsupported_by_extension: Record<string, number>;
+}
+
+let sourceDir: string | null = null;
+let sourceScan: SourceScan | null = null;
+let sourceScanning = false;
+let sourceFolder = ""; // "" = whole library, else a relative folder path
+const expanded = new Set<string>();
+
+interface TreeNode {
+  name: string;
+  path: string;
+  children: Map<string, TreeNode>;
+  eligible: number;
+  total: number;
+}
+
+function buildTree(files: SourceFile[]): TreeNode {
+  const root: TreeNode = { name: "", path: "", children: new Map(), eligible: 0, total: 0 };
+  for (const f of files) {
+    const dirs = f.relative_path.split("/").slice(0, -1);
+    let node = root;
+    node.total++;
+    if (f.eligible) node.eligible++;
+    let path = "";
+    for (const d of dirs) {
+      path = path ? `${path}/${d}` : d;
+      let child = node.children.get(d);
+      if (!child) {
+        child = { name: d, path, children: new Map(), eligible: 0, total: 0 };
+        node.children.set(d, child);
+      }
+      node = child;
+      node.total++;
+      if (f.eligible) node.eligible++;
+    }
+  }
+  return root;
+}
+
+function renderTreeNode(node: TreeNode, isRoot: boolean): HTMLLIElement {
+  const li = document.createElement("li");
+  const row = document.createElement("div");
+  const hasKids = node.children.size > 0;
+  const open = isRoot || expanded.has(node.path);
+  row.className = `row${node.path === sourceFolder ? " selected" : ""}${node.eligible === 0 ? " empty" : ""}`;
+
+  const twisty = Object.assign(document.createElement("span"), { className: "twisty", textContent: hasKids ? (open ? "−" : "+") : "" });
+  const name = Object.assign(document.createElement("span"), { className: "name", textContent: isRoot ? "(all)" : node.name });
+  const count = Object.assign(document.createElement("span"), { className: "count", textContent: String(node.eligible) });
+  row.append(twisty, name, count);
+
+  twisty.addEventListener("click", (e) => {
+    if (!hasKids || isRoot) return;
+    e.stopPropagation();
+    if (expanded.has(node.path)) expanded.delete(node.path);
+    else expanded.add(node.path);
+    renderSource();
+  });
+  row.addEventListener("click", () => {
+    sourceFolder = node.path;
+    renderSource();
+  });
+  li.append(row);
+
+  if (hasKids && open) {
+    const ul = document.createElement("ul");
+    [...node.children.values()]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach((c) => ul.append(renderTreeNode(c, false)));
+    li.append(ul);
+  }
+  return li;
+}
+
+function renderSource() {
+  const showIneligible = $<HTMLInputElement>("#show-ineligible").checked;
+  const summary = $("#source-summary");
+  const body = $("#source-results");
+  if (!sourceScan) {
+    summary.textContent = "";
+    body.replaceChildren();
+    $("#source-tree").replaceChildren();
+    return;
+  }
+
+  // A rescan may have removed the selected folder.
+  if (sourceFolder !== "" && !sourceScan.files.some((f) => f.relative_path.startsWith(`${sourceFolder}/`))) {
+    sourceFolder = "";
+  }
+  const tree = buildTree(sourceScan.files);
+  const treeEl = $("#source-tree");
+  const rootUl = document.createElement("ul");
+  rootUl.append(renderTreeNode(tree, true));
+  treeEl.replaceChildren(rootUl);
+  const inFolder = (f: SourceFile) => sourceFolder === "" || f.relative_path.startsWith(`${sourceFolder}/`);
+
+  const unsupported = Object.entries(sourceScan.unsupported_by_extension);
+  const unsupportedTotal = unsupported.reduce((n, [, c]) => n + c, 0);
+  const parts = [`${sourceScan.eligible_count} eligible of ${sourceScan.files.length} supported files`];
+  if (unsupportedTotal > 0) {
+    parts.push(`${unsupportedTotal} unusable (${unsupported.map(([e, c]) => `${c} .${e}`).join(", ")})`);
+  }
+  summary.textContent = parts.join(" · ");
+
+  body.replaceChildren(
+    ...sourceScan.files
+      .filter((f) => inFolder(f) && (showIneligible || f.eligible))
+      .map((f) => {
+        const tr = document.createElement("tr");
+        if (!f.eligible) tr.className = "ineligible";
+        tr.append(
+          cell(f.relative_path),
+          cell(f.tags.title ?? ""),
+          cell(f.tags.artist ?? ""),
+          cell(f.duration_secs === null ? "" : `${f.duration_secs.toFixed(1)}s`, "dim"),
+          cell(specString(f), "dim"),
+          cell(f.warnings.join("; "), "warn"),
+        );
+        return tr;
+      }),
+  );
+}
+
+async function scanSource() {
+  if (!sourceDir || sourceScanning) return;
+  sourceScanning = true;
+  $("#source-summary").textContent = "Scanning…";
+  try {
+    sourceScan = await invoke<SourceScan>("scan_source", { path: sourceDir });
+    renderSource();
+  } catch (err) {
+    sourceScan = null;
+    $("#source-results").replaceChildren();
+    $("#source-summary").textContent = `Error: ${err}`;
+  } finally {
+    sourceScanning = false;
+  }
+}
+
+function setSourceDir(dir: string | null) {
+  if (dir !== sourceDir) {
+    sourceFolder = "";
+    expanded.clear();
+  }
+  sourceDir = dir;
+  $("#source-path").textContent = dir ?? "No folder selected";
+  ($("#rescan-source") as HTMLButtonElement).disabled = dir === null;
+  try {
+    if (dir) localStorage.setItem(SOURCE_KEY, dir);
+  } catch {
+    // storage unavailable; the folder just won't be remembered
+  }
+  void scanSource();
+}
+
+async function chooseSource() {
+  const picked = await open({ directory: true, multiple: false, defaultPath: sourceDir ?? undefined });
+  if (typeof picked === "string") setSourceDir(picked);
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   const prefs = loadPrefs();
   $<HTMLInputElement>("#auto-select").checked = prefs.autoSelect;
@@ -185,6 +359,16 @@ window.addEventListener("DOMContentLoaded", () => {
     savePrefs();
     void refreshVolumes();
   });
+
+  $("#choose-source").addEventListener("click", () => void chooseSource());
+  $("#rescan-source").addEventListener("click", () => void scanSource());
+  $("#show-ineligible").addEventListener("change", renderSource);
+  try {
+    const last = localStorage.getItem(SOURCE_KEY);
+    if (last) setSourceDir(last);
+  } catch {
+    // storage unavailable
+  }
 
   void refreshVolumes();
   setInterval(() => void refreshVolumes(), POLL_MS);

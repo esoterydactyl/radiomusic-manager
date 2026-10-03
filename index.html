@@ -36,6 +36,31 @@
         </thead>
         <tbody id="scan-results"></tbody>
       </table>
+    <section class="source">
+        <header class="section-head">
+          <div class="eyebrow">Source library</div>
+        </header>
+        <div class="card-bar">
+          <button type="button" class="btn" id="choose-source">Choose folder…</button>
+          <span class="path" id="source-path">No folder selected</span>
+          <button type="button" class="btn" id="rescan-source" disabled>Rescan</button>
+        </div>
+        <section class="options">
+          <label class="check"><input type="checkbox" id="show-ineligible" /> Show ineligible files</label>
+        </section>
+        <p class="summary" id="source-summary"></p>
+        <div class="source-layout">
+          <nav class="tree" id="source-tree" aria-label="Source folders"></nav>
+          <table class="results">
+          <thead>
+            <tr>
+              <th>File</th><th>Title</th><th>Artist</th><th>Length</th><th>Format</th><th>Notes</th>
+            </tr>
+          </thead>
+          <tbody id="source-results"></tbody>
+        </table>
+        </div>
+      </section>
     </main>
   </body>
 </html>
