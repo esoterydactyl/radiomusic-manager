@@ -381,3 +381,30 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
+
+#[cfg(test)]
+mod real_volume {
+    use super::*;
+
+    /// Manual: `RMM_TEST_CARD=/Volumes/X cargo test real_volume -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn write_to_real_volume() {
+        let card = std::env::var("RMM_TEST_CARD").expect("set RMM_TEST_CARD");
+        let card = Path::new(&card);
+        let src = std::env::temp_dir().join("rmm-real-src");
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(&src).unwrap();
+        let mut cs = Vec::new();
+        for i in 0..6 {
+            let p = src.join(format!("s{i}.raw"));
+            std::fs::write(&p, vec![i as u8; 50_000]).unwrap();
+            cs.push(Candidate { path: p.to_string_lossy().into_owned(), size_bytes: 50_000 });
+        }
+        let p = plan(cs, 3, 2, 9, None).unwrap();
+        println!("vols: {:?}", crate::volumes::list().iter().map(|v| (&v.mount_point, &v.file_system, v.available_bytes)).collect::<Vec<_>>());
+        let r = write(card, &p, |pr| println!("progress {} / {} {}", pr.done, pr.total, pr.current));
+        println!("result: {r:?}");
+        r.unwrap();
+    }
+}

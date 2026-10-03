@@ -72,6 +72,22 @@
         <header class="section-head">
           <div class="eyebrow">Build card</div>
         </header>
+        <div class="format-bar">
+          <span class="label-mono">Card format</span>
+          <span class="format-info" id="fmt-info">No card selected</span>
+          <label class="field"><span class="label-mono">Label</span>
+            <input type="text" id="fmt-label" value="RADIOMUSIC" size="12" maxlength="11" spellcheck="false" autocomplete="off" />
+          </label>
+          <button type="button" class="btn danger" id="fmt-open" disabled>Format card…</button>
+        </div>
+        <div class="format-confirm" id="fmt-confirm" hidden>
+          <p id="fmt-warning"></p>
+          <div class="format-confirm-row">
+            <input type="text" id="fmt-typed" size="16" spellcheck="false" autocomplete="off" />
+            <button type="button" class="btn danger" id="fmt-go" disabled>Erase and format</button>
+            <button type="button" class="btn" id="fmt-cancel">Cancel</button>
+          </div>
+        </div>
         <div class="build-controls">
           <label class="field"><span class="label-mono">Banks</span>
             <input type="range" id="b-banks" min="1" max="16" value="1" />

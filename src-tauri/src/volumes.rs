@@ -9,6 +9,8 @@ use std::path::Path;
 use serde::Serialize;
 use sysinfo::Disks;
 
+use crate::disk;
+
 const GB: u64 = 1_000_000_000;
 const MAX_FAT32_BYTES: u64 = 32 * GB;
 const MAX_EXFAT_BYTES: u64 = 2_000 * GB;
@@ -22,6 +24,14 @@ pub struct Volume {
     pub total_bytes: u64,
     pub available_bytes: u64,
     pub removable: bool,
+    /// Partition table type (`MBR`, `GPT`, ...) when the OS can tell us.
+    pub partition_scheme: Option<String>,
+    pub partition_count: Option<usize>,
+    pub disk_size_bytes: Option<u64>,
+    /// Whether the app is willing to format this disk, and what it would become.
+    pub formattable: bool,
+    pub format_blocker: Option<String>,
+    pub format_fs: Option<String>,
     /// Why this volume wouldn't work as a Radio Music card (empty if it looks fine).
     pub warnings: Vec<String>,
 }
@@ -34,8 +44,26 @@ fn normalise_fs(raw: &str) -> String {
     }
 }
 
-fn warnings_for(file_system: &str, total_bytes: u64) -> Vec<String> {
+fn warnings_for(
+    file_system: &str,
+    total_bytes: u64,
+    scheme: Option<&str>,
+    partitions: Option<usize>,
+) -> Vec<String> {
     let mut w = Vec::new();
+    if let Some(scheme) = scheme {
+        if scheme != "MBR" {
+            w.push(format!(
+                "Partition table is {}; the Radio Music needs an MBR boot record",
+                if scheme == "none" { "missing" } else { scheme }
+            ));
+        }
+    }
+    if let Some(n) = partitions {
+        if n > 1 {
+            w.push(format!("The card has {n} partitions; it should have exactly one"));
+        }
+    }
     match file_system {
         "FAT32" if total_bytes > MAX_FAT32_BYTES => w.push(
             "FAT32 cards are supported up to 32GB; larger cards must be exFAT".to_string(),
@@ -74,12 +102,32 @@ pub fn list() -> Vec<Volume> {
         .iter()
         .filter(|d| !is_system_mount(d.mount_point()))
         .map(|d| {
-            let file_system = normalise_fs(&d.file_system().to_string_lossy());
             let total_bytes = d.total_space();
+            let details = disk::details(d.mount_point());
+            // diskutil can tell FAT16 from FAT32; sysinfo reports both as "msdos".
+            let file_system = match &details {
+                Some(det) if !det.file_system.is_empty() => det.file_system.clone(),
+                _ => normalise_fs(&d.file_system().to_string_lossy()),
+            };
+            let blocker = details
+                .as_ref()
+                .and_then(|det| disk::format_blocker(det, None))
+                .or_else(|| details.is_none().then(|| "Disk details unavailable on this platform".to_string()));
             Volume {
+                partition_scheme: details.as_ref().map(|x| x.scheme.clone()),
+                partition_count: details.as_ref().map(|x| x.partition_count),
+                disk_size_bytes: details.as_ref().map(|x| x.disk_size_bytes),
+                formattable: blocker.is_none(),
+                format_fs: details.as_ref().map(|x| disk::target_fs(x.disk_size_bytes).to_string()),
+                format_blocker: blocker,
                 name: d.name().to_string_lossy().into_owned(),
                 mount_point: d.mount_point().to_string_lossy().into_owned(),
-                warnings: warnings_for(&file_system, total_bytes),
+                warnings: warnings_for(
+                    &file_system,
+                    total_bytes,
+                    details.as_ref().map(|x| x.scheme.as_str()),
+                    details.as_ref().map(|x| x.partition_count),
+                ),
                 file_system,
                 total_bytes,
                 available_bytes: d.available_space(),
@@ -105,12 +153,26 @@ mod tests {
 
     #[test]
     fn card_warnings() {
-        assert!(warnings_for("FAT32", 16 * GB).is_empty());
-        assert!(warnings_for("exFAT", 256 * GB).is_empty());
-        assert_eq!(warnings_for("FAT32", 64 * GB).len(), 1);
-        assert_eq!(warnings_for("exFAT", 3_000 * GB).len(), 1);
-        assert_eq!(warnings_for("ntfs", 8 * GB).len(), 1);
-        assert_eq!(warnings_for("", 8 * GB).len(), 1);
+        assert!(warnings_for("FAT32", 16 * GB, None, None).is_empty());
+        assert!(warnings_for("exFAT", 256 * GB, None, None).is_empty());
+        assert_eq!(warnings_for("FAT32", 64 * GB, None, None).len(), 1);
+        assert_eq!(warnings_for("exFAT", 3_000 * GB, None, None).len(), 1);
+        assert_eq!(warnings_for("ntfs", 8 * GB, None, None).len(), 1);
+        assert_eq!(warnings_for("", 8 * GB, None, None).len(), 1);
+    }
+
+    #[test]
+    fn partition_problems_are_reported() {
+        assert!(warnings_for("FAT32", 8 * GB, Some("MBR"), Some(1)).is_empty());
+        let gpt = warnings_for("FAT32", 8 * GB, Some("GPT"), Some(1));
+        assert!(gpt.iter().any(|w| w.contains("GPT")));
+        let none = warnings_for("FAT32", 8 * GB, Some("none"), Some(1));
+        assert!(none.iter().any(|w| w.contains("missing")));
+        let multi = warnings_for("FAT32", 268_000_000, Some("MBR"), Some(2));
+        assert!(multi.iter().any(|w| w.contains("2 partitions")));
+        // The user's real card: FAT16 first partition plus a Linux partition.
+        let bad = warnings_for("FAT16", 268_000_000, Some("MBR"), Some(2));
+        assert_eq!(bad.len(), 2);
     }
 
     #[test]

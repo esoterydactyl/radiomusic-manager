@@ -68,6 +68,12 @@ interface Volume {
   total_bytes: number;
   available_bytes: number;
   removable: boolean;
+  partition_scheme: string | null;
+  partition_count: number | null;
+  disk_size_bytes: number | null;
+  formattable: boolean;
+  format_blocker: string | null;
+  format_fs: string | null;
   warnings: string[];
 }
 
@@ -121,7 +127,16 @@ function renderPicker() {
 
   const vol = list.find((v) => v.mount_point === selected);
   $("#card-info").textContent = vol
-    ? `${vol.file_system || "unknown fs"} · ${formatBytes(vol.total_bytes)} · ${formatBytes(vol.available_bytes)} free`
+    ? [
+        vol.file_system || "unknown fs",
+        formatBytes(vol.total_bytes),
+        `${formatBytes(vol.available_bytes)} free`,
+        vol.partition_scheme ? `${vol.partition_scheme} partition table` : null,
+        vol.partition_count !== null ? `${vol.partition_count} partition${vol.partition_count === 1 ? "" : "s"}` : null,
+        vol.disk_size_bytes && vol.disk_size_bytes !== vol.total_bytes ? `${formatBytes(vol.disk_size_bytes)} disk` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
     : "";
   $("#card-warnings").replaceChildren(
     ...(vol?.warnings ?? []).map((w) => Object.assign(document.createElement("li"), { textContent: w })),
@@ -150,6 +165,8 @@ async function scanSelected() {
 function select(mount: string | null) {
   if (mount === selected) return;
   selected = mount;
+  $("#fmt-confirm").hidden = true;
+  $<HTMLInputElement>("#fmt-typed").value = "";
   renderPicker();
   clearResults();
   updateBuildPanel();
@@ -501,14 +518,26 @@ function updateBuildPanel() {
 
   const vol = selectedVolume();
   const cardOk = !!vol && vol.warnings.length === 0;
-  ($("#b-roll") as HTMLButtonElement).disabled = writing || pool.length === 0 || perBank === null;
-  ($("#b-write") as HTMLButtonElement).disabled = writing || !plan || !cardOk;
+  ($("#b-roll") as HTMLButtonElement).disabled = writing || formatting || pool.length === 0 || perBank === null;
+  ($("#b-write") as HTMLButtonElement).disabled = writing || formatting || !plan || !cardOk;
+
+  // Say why Write is unavailable instead of leaving a silently dimmed button.
+  let reason = "";
+  if (!sourceScan) reason = "Choose a source folder first";
+  else if (pool.length === 0) reason = "No eligible files in the pool";
+  else if (!plan) reason = "Press Roll to pick a random selection";
+  else if (!vol) reason = "Select a card above";
+  else if (!cardOk) reason = "The selected card is not usable";
+  ($("#b-write") as HTMLButtonElement).title = reason;
+  updateFormatPanel();
 
   if (!writing && !$("#b-status").dataset.sticky) {
-    $("#b-status").textContent = !plan
-      ? ""
-      : `${plan.files.length} files · ${formatBytes(plan.total_bytes)} · seed ${plan.seed}` +
-        (cardOk ? ` · will be written to ${vol!.name || vol!.mount_point}` : vol ? " · selected card is not usable" : " · select a card to write");
+    $("#b-status").textContent = plan
+      ? `${plan.files.length} files · ${formatBytes(plan.total_bytes)} · seed ${plan.seed}` +
+        (cardOk ? ` · ready to write to ${vol!.name || vol!.mount_point}` : ` · ${reason.toLowerCase()}`)
+      : sourceScan && pool.length > 0
+        ? `${reason}, then Write to card.`
+        : "";
   }
 }
 
@@ -545,11 +574,20 @@ async function writePlan() {
   const vol = selectedVolume();
   if (!plan || !vol || writing) return;
   const label = vol.name || vol.mount_point;
-  const go = await ask(
-    `Copy ${plan.files.length} files (${formatBytes(plan.total_bytes)}) to ${label}? Existing files on the card are not touched.`,
-    { title: "Write to card", kind: "info" },
-  );
-  if (!go) return;
+  let go: boolean;
+  try {
+    go = await ask(
+      `Copy ${plan.files.length} files (${formatBytes(plan.total_bytes)}) to ${label}? Existing files on the card are not touched.`,
+      { title: "Write to card", kind: "info" },
+    );
+  } catch (err) {
+    setBuildStatus(`Could not show the confirmation dialog: ${err}`, true);
+    return;
+  }
+  if (!go) {
+    setBuildStatus("Write cancelled.", true);
+    return;
+  }
 
   writing = true;
   updateBuildPanel();
@@ -567,6 +605,94 @@ async function writePlan() {
   } finally {
     unlisten();
     writing = false;
+    updateBuildPanel();
+  }
+}
+
+// ---- Format card ------------------------------------------------------------
+
+let formatting = false;
+const LABEL_RE = /^[A-Z0-9_-]{1,11}$/;
+
+function labelValue(): string {
+  // FAT labels are upper-case; normalise as the user types.
+  const el = $<HTMLInputElement>("#fmt-label");
+  const cleaned = el.value.toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+  if (cleaned !== el.value) el.value = cleaned;
+  el.setAttribute("aria-invalid", String(!LABEL_RE.test(cleaned)));
+  return cleaned;
+}
+
+function confirmName(vol: Volume): string {
+  return vol.name || "ERASE";
+}
+
+function updateFormatPanel() {
+  const vol = selectedVolume();
+  const label = labelValue();
+  const openBtn = $("#fmt-open") as HTMLButtonElement;
+
+  $("#fmt-info").textContent = !vol
+    ? "No card selected"
+    : vol.formattable
+      ? `Erases the whole disk and creates one ${vol.format_fs ?? "FAT32"} partition with an MBR boot record.`
+      : `Cannot format: ${vol.format_blocker ?? "unsupported"}`;
+  openBtn.disabled = formatting || writing || !vol || !vol.formattable || !LABEL_RE.test(label);
+
+  const typed = $<HTMLInputElement>("#fmt-typed").value.trim();
+  ($("#fmt-go") as HTMLButtonElement).disabled = formatting || !vol || typed !== confirmName(vol);
+  if (!vol || formatting) return;
+}
+
+function closeFormatConfirm() {
+  $("#fmt-confirm").hidden = true;
+  $<HTMLInputElement>("#fmt-typed").value = "";
+  updateFormatPanel();
+}
+
+function openFormatConfirm() {
+  const vol = selectedVolume();
+  if (!vol) return;
+  const disk = vol.disk_size_bytes ? `${formatBytes(vol.disk_size_bytes)} disk` : "the whole disk";
+  const parts = vol.partition_count ? `, including all ${vol.partition_count} partition${vol.partition_count === 1 ? "" : "s"}` : "";
+  $("#fmt-warning").textContent =
+    `This will ERASE EVERYTHING on ${vol.name || vol.mount_point} (${disk}${parts}) and create one ` +
+    `${vol.format_fs ?? "FAT32"} partition named ${labelValue()}. This cannot be undone. ` +
+    `Type "${confirmName(vol)}" to confirm.`;
+  $<HTMLInputElement>("#fmt-typed").value = "";
+  $("#fmt-confirm").hidden = false;
+  $<HTMLInputElement>("#fmt-typed").focus();
+  updateFormatPanel();
+}
+
+async function formatSelected() {
+  const vol = selectedVolume();
+  if (!vol || formatting || $<HTMLInputElement>("#fmt-typed").value.trim() !== confirmName(vol)) return;
+  const label = labelValue();
+  if (!LABEL_RE.test(label)) return;
+
+  formatting = true;
+  plan = null;
+  renderPlan();
+  closeFormatConfirm();
+  setBuildStatus(`Formatting ${vol.name || vol.mount_point}… do not remove the card.`, true);
+  updateBuildPanel();
+  try {
+    const newMount = await invoke<string>("format_card", { mountPoint: vol.mount_point, label });
+    setBuildStatus(`Formatted as ${label}.`, true);
+    // The volume remounts under its new name; wait for it to show up, then select it.
+    for (let i = 0; i < 10; i++) {
+      await refreshVolumes();
+      if (volumes.some((v) => v.mount_point === newMount)) {
+        select(newMount);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  } catch (err) {
+    setBuildStatus(`Format failed: ${err}`, true);
+  } finally {
+    formatting = false;
     updateBuildPanel();
   }
 }
@@ -619,6 +745,11 @@ window.addEventListener("DOMContentLoaded", () => {
     delete $("#b-status").dataset.sticky;
     updateBuildPanel();
   });
+  $("#fmt-label").addEventListener("input", updateFormatPanel);
+  $("#fmt-open").addEventListener("click", openFormatConfirm);
+  $("#fmt-typed").addEventListener("input", updateFormatPanel);
+  $("#fmt-cancel").addEventListener("click", closeFormatConfirm);
+  $("#fmt-go").addEventListener("click", () => void formatSelected());
   $("#b-roll").addEventListener("click", () => void roll());
   $("#b-write").addEventListener("click", () => void writePlan());
   updateBuildPanel();

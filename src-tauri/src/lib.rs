@@ -1,4 +1,5 @@
 mod card;
+mod disk;
 mod scan;
 mod source;
 mod volumes;
@@ -54,12 +55,28 @@ async fn write_card(app: tauri::AppHandle, card_path: String, plan: card::Plan) 
     .map_err(|e| e.to_string())?
 }
 
+/// Erases the whole disk behind `mount_point` and creates one MBR partition. Destructive.
+#[tauri::command]
+async fn format_card(mount_point: String, label: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Only ever format a volume we are currently listing as a card candidate.
+        let listed = volumes::list().into_iter().find(|v| v.mount_point == mount_point);
+        match listed {
+            None => Err(format!("{mount_point} is not a mounted volume")),
+            Some(v) if !v.formattable => Err(v.format_blocker.unwrap_or_else(|| "This volume cannot be formatted".into())),
+            Some(_) => disk::format(std::path::Path::new(&mount_point), &label),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![list_volumes, scan_directory, scan_source, plan_card, write_card])
+        .invoke_handler(tauri::generate_handler![list_volumes, scan_directory, scan_source, plan_card, write_card, format_card])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
