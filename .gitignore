@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Private Ecotone Labs design assets (symlink to local private copy)
+/src/ecotone
