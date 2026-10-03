@@ -1,22 +1,67 @@
 import { invoke } from "@tauri-apps/api/core";
 
-let greetInputEl: HTMLInputElement | null;
-let greetMsgEl: HTMLElement | null;
+interface AudioFileInfo {
+  relative_path: string;
+  bank: number | null;
+  format: string;
+  duration_secs: number | null;
+  sample_rate: number | null;
+  bit_depth: number | null;
+  channels: number | null;
+  tags: { title?: string; artist?: string; album?: string };
+  warnings: string[];
+}
 
-async function greet() {
-  if (greetMsgEl && greetInputEl) {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsgEl.textContent = await invoke("greet", {
-      name: greetInputEl.value,
-    });
-  }
+interface ScanResult {
+  files: AudioFileInfo[];
+  folder_count: number;
+  warnings: string[];
+}
+
+function cell(text: string): HTMLTableCellElement {
+  const td = document.createElement("td");
+  td.textContent = text;
+  return td;
+}
+
+function render(result: ScanResult) {
+  document.querySelector("#scan-summary")!.textContent =
+    `${result.files.length} audio files in ${result.folder_count} folders`;
+
+  const warnings = document.querySelector("#scan-warnings")!;
+  warnings.replaceChildren(
+    ...result.warnings.map((w) => Object.assign(document.createElement("li"), { textContent: w })),
+  );
+
+  const table = document.querySelector("#scan-results")!;
+  table.replaceChildren(
+    ...result.files.map((f) => {
+      const tr = document.createElement("tr");
+      const spec = [f.sample_rate && `${f.sample_rate} Hz`, f.bit_depth && `${f.bit_depth}-bit`, f.channels && `${f.channels}ch`]
+        .filter(Boolean)
+        .join(" ");
+      tr.append(
+        cell(f.bank === null ? "root" : String(f.bank)),
+        cell(f.relative_path),
+        cell(f.tags.title ?? ""),
+        cell(f.tags.artist ?? ""),
+        cell(f.duration_secs === null ? "" : `${f.duration_secs.toFixed(1)}s`),
+        cell(spec),
+        cell(f.warnings.join("; ")),
+      );
+      return tr;
+    }),
+  );
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-  greetInputEl = document.querySelector("#greet-input");
-  greetMsgEl = document.querySelector("#greet-msg");
-  document.querySelector("#greet-form")?.addEventListener("submit", (e) => {
+  document.querySelector("#scan-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    greet();
+    const path = (document.querySelector("#scan-path") as HTMLInputElement).value;
+    try {
+      render(await invoke<ScanResult>("scan_directory", { path }));
+    } catch (err) {
+      document.querySelector("#scan-summary")!.textContent = `Error: ${err}`;
+    }
   });
 });
