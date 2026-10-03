@@ -79,7 +79,8 @@ pub fn request_cancel() {
 /// Needs the macOS-only `diskutil` path, so elsewhere we fall back to deleting audio files.
 const FORMAT_TO_CLEAR: bool = cfg!(target_os = "macos");
 
-const COPY_CHUNK: usize = 1024 * 1024;
+/// Small enough that progress moves in fine steps even when the card drains slowly.
+const COPY_CHUNK: usize = 256 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Replace characters that FAT/exFAT forbid. Uses `-` rather than `_` so the

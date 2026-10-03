@@ -660,9 +660,20 @@ async function roll() {
   updateBuildPanel();
 }
 
-/** Recent (time, bytes) samples used to estimate speed over a sliding window. */
-const speedSamples: { t: number; bytes: number }[] = [];
-const SPEED_WINDOW_MS = 6000;
+/**
+ * Speed and ETA come from the whole run so far, not a short window. A slow card accepts data in
+ * bursts with 10-30 s stalls in between, and a short window would read 0 MB/s during every stall.
+ */
+let writeStartedAt = 0; // when the first byte of this write was reported
+let lastAdvanceAt = 0; // last time bytes_done increased
+let lastBytes = 0;
+const STALL_AFTER_MS = 3000;
+
+function resetWriteStats() {
+  writeStartedAt = 0;
+  lastAdvanceAt = 0;
+  lastBytes = 0;
+}
 
 function formatDuration(secs: number): string {
   if (!isFinite(secs) || secs < 0) return "…";
@@ -674,8 +685,6 @@ function formatDuration(secs: number): string {
 function onWriteProgress(p: WriteProgress) {
   progress = p;
   const now = performance.now();
-  speedSamples.push({ t: now, bytes: p.bytes_done });
-  while (speedSamples.length > 2 && now - speedSamples[0].t > SPEED_WINDOW_MS) speedSamples.shift();
 
   ($("#b-bar") as HTMLElement).style.width = `${p.bytes_total ? (100 * p.bytes_done) / p.bytes_total : 0}%`;
   renderBankTable();
@@ -688,17 +697,30 @@ function onWriteProgress(p: WriteProgress) {
     setBuildStatus("Formatting the card to clear it…", true);
     return;
   }
-  const first = speedSamples[0];
-  const dt = (now - first.t) / 1000;
-  const speed = dt > 0.5 ? (p.bytes_done - first.bytes) / dt : 0;
-  const eta = speed > 0 ? (p.bytes_total - p.bytes_done) / speed : NaN;
+
+  if (writeStartedAt === 0) {
+    writeStartedAt = now;
+    lastAdvanceAt = now;
+  }
+  if (p.bytes_done > lastBytes) {
+    lastBytes = p.bytes_done;
+    lastAdvanceAt = now;
+  }
+  const elapsed = (now - writeStartedAt) / 1000;
+  const stalledFor = now - lastAdvanceAt;
+  // Wait for a few seconds of data before trusting an average.
+  const avg = elapsed >= 3 && p.bytes_done > 0 ? p.bytes_done / elapsed : 0;
+  const remaining = p.bytes_total - p.bytes_done;
+
   setBuildStatus(
     [
       `Bank ${bankLabel(p.bank)}`,
       `file ${Math.min(p.done_files + 1, p.total_files)}/${p.total_files}`,
       `${formatBytes(p.bytes_done)} / ${formatBytes(p.bytes_total)}`,
-      speed > 0 ? `${(speed / 1e6).toFixed(1)} MB/s` : null,
-      speed > 0 ? `~${formatDuration(eta)} left` : null,
+      avg > 0 ? `avg ${(avg / 1e6).toFixed(1)} MB/s` : "measuring speed…",
+      avg > 0 ? `~${formatDuration(remaining / avg)} left` : null,
+      `${formatDuration(elapsed)} elapsed`,
+      stalledFor >= STALL_AFTER_MS ? `waiting on card ${Math.round(stalledFor / 1000)}s` : null,
     ]
       .filter(Boolean)
       .join(" · "),
@@ -753,7 +775,7 @@ async function writePlan() {
   writing = true;
   updateBuildPanel();
   progress = null;
-  speedSamples.length = 0;
+  resetWriteStats();
   ($("#b-progress") as HTMLElement).hidden = false;
   const unlisten = await listen<WriteProgress>("write-progress", (e) => onWriteProgress(e.payload));
   try {
