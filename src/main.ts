@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { compareBy, isFiltering, matches, NO_FILTERS, parseDuration, type Filters, type SortKey } from "./filters";
 
 interface AudioFileInfo {
   relative_path: string;
@@ -9,7 +10,6 @@ interface AudioFileInfo {
   sample_rate: number | null;
   bit_depth: number | null;
   channels: number | null;
-  tags: { title?: string; artist?: string; album?: string };
   warnings: string[];
 }
 
@@ -46,14 +46,12 @@ function render(result: ScanResult) {
   table.replaceChildren(
     ...result.files.map((f) => {
       const tr = document.createElement("tr");
+      if (f.warnings.length > 0) tr.title = f.warnings.join("; ");
       tr.append(
         cell(f.bank === null ? "root" : String(f.bank), "dim"),
         cell(f.relative_path),
-        cell(f.tags.title ?? ""),
-        cell(f.tags.artist ?? ""),
         cell(f.duration_secs === null ? "" : `${f.duration_secs.toFixed(1)}s`, "dim"),
         cell(specString(f), "dim"),
-        cell(f.warnings.join("; "), "warn"),
       );
       return tr;
     }),
@@ -187,6 +185,8 @@ interface SourceScan {
 let sourceDir: string | null = null;
 let sourceScan: SourceScan | null = null;
 let sourceScanning = false;
+let filters: Filters = { ...NO_FILTERS };
+let sort: { key: SortKey; dir: 1 | -1 } | null = null;
 let sourceFolder = ""; // "" = whole library, else a relative folder path
 const expanded = new Set<string>();
 
@@ -198,13 +198,14 @@ interface TreeNode {
   total: number;
 }
 
-function buildTree(files: SourceFile[]): TreeNode {
+/** `counts` decides which files contribute to each folder's displayed count. */
+function buildTree(files: SourceFile[], counts: (f: SourceFile) => boolean): TreeNode {
   const root: TreeNode = { name: "", path: "", children: new Map(), eligible: 0, total: 0 };
   for (const f of files) {
     const dirs = f.relative_path.split("/").slice(0, -1);
     let node = root;
     node.total++;
-    if (f.eligible) node.eligible++;
+    if (counts(f)) node.eligible++;
     let path = "";
     for (const d of dirs) {
       path = path ? `${path}/${d}` : d;
@@ -215,7 +216,7 @@ function buildTree(files: SourceFile[]): TreeNode {
       }
       node = child;
       node.total++;
-      if (f.eligible) node.eligible++;
+      if (counts(f)) node.eligible++;
     }
   }
   return root;
@@ -271,7 +272,8 @@ function renderSource() {
   if (sourceFolder !== "" && !sourceScan.files.some((f) => f.relative_path.startsWith(`${sourceFolder}/`))) {
     sourceFolder = "";
   }
-  const tree = buildTree(sourceScan.files);
+  const passes = (f: SourceFile) => matches(f, filters);
+  const tree = buildTree(sourceScan.files, (f) => f.eligible && passes(f));
   const treeEl = $("#source-tree");
   const rootUl = document.createElement("ul");
   rootUl.append(renderTreeNode(tree, true));
@@ -280,29 +282,65 @@ function renderSource() {
 
   const unsupported = Object.entries(sourceScan.unsupported_by_extension);
   const unsupportedTotal = unsupported.reduce((n, [, c]) => n + c, 0);
+  const visible = sourceScan.files.filter(
+    (f) => inFolder(f) && passes(f) && (showIneligible || f.eligible),
+  );
+  if (sort) visible.sort(compareBy(sort.key, sort.dir));
   const parts = [`${sourceScan.eligible_count} eligible of ${sourceScan.files.length} supported files`];
+  if (isFiltering(filters) || sourceFolder !== "") parts.unshift(`${visible.length} shown`);
   if (unsupportedTotal > 0) {
     parts.push(`${unsupportedTotal} unusable (${unsupported.map(([e, c]) => `${c} .${e}`).join(", ")})`);
   }
   summary.textContent = parts.join(" · ");
 
   body.replaceChildren(
-    ...sourceScan.files
-      .filter((f) => inFolder(f) && (showIneligible || f.eligible))
-      .map((f) => {
+    ...visible.map((f) => {
         const tr = document.createElement("tr");
         if (!f.eligible) tr.className = "ineligible";
+        if (f.warnings.length > 0) tr.title = f.warnings.join("; ");
         tr.append(
           cell(f.relative_path),
-          cell(f.tags.title ?? ""),
-          cell(f.tags.artist ?? ""),
           cell(f.duration_secs === null ? "" : `${f.duration_secs.toFixed(1)}s`, "dim"),
           cell(specString(f), "dim"),
-          cell(f.warnings.join("; "), "warn"),
-        );
+          );
         return tr;
       }),
   );
+
+  syncFilterControls();
+}
+
+/** Reflect filter/sort state in the controls (clear button, sort arrows). */
+function syncFilterControls() {
+  ($("#f-clear") as HTMLButtonElement).disabled = !isFiltering(filters);
+  document.querySelectorAll<HTMLElement>("th[data-sort]").forEach((th) => {
+    const active = sort?.key === th.dataset.sort;
+    th.classList.toggle("sorted", active);
+    th.classList.toggle("desc", active && sort?.dir === -1);
+  });
+}
+
+function readFilters() {
+  const min = $<HTMLInputElement>("#f-min");
+  const max = $<HTMLInputElement>("#f-max");
+  const minSecs = parseDuration(min.value);
+  const maxSecs = parseDuration(max.value);
+  // Non-blank but unparseable input is flagged and ignored rather than silently dropped.
+  min.setAttribute("aria-invalid", String(min.value.trim() !== "" && minSecs === null));
+  max.setAttribute("aria-invalid", String(max.value.trim() !== "" && maxSecs === null));
+  filters = {
+    search: $<HTMLInputElement>("#f-search").value,
+    minSecs,
+    maxSecs,
+    format: $<HTMLSelectElement>("#f-format").value,
+  };
+  renderSource();
+}
+
+function clearFilters() {
+  for (const id of ["#f-search", "#f-min", "#f-max"]) $<HTMLInputElement>(id).value = "";
+  $<HTMLSelectElement>("#f-format").value = "";
+  readFilters();
 }
 
 async function scanSource() {
@@ -363,6 +401,17 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#choose-source").addEventListener("click", () => void chooseSource());
   $("#rescan-source").addEventListener("click", () => void scanSource());
   $("#show-ineligible").addEventListener("change", renderSource);
+  for (const id of ["#f-search", "#f-min", "#f-max"]) $(id).addEventListener("input", readFilters);
+  for (const id of ["#f-format"]) $(id).addEventListener("change", readFilters);
+  $("#f-clear").addEventListener("click", clearFilters);
+  document.querySelectorAll<HTMLElement>("th[data-sort]").forEach((th) =>
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort as SortKey;
+      // asc -> desc -> unsorted
+      sort = sort?.key !== key ? { key, dir: 1 } : sort.dir === 1 ? { key, dir: -1 } : null;
+      renderSource();
+    }),
+  );
   try {
     const last = localStorage.getItem(SOURCE_KEY);
     if (last) setSourceDir(last);

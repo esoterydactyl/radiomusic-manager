@@ -5,9 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::file::AudioFile;
 use lofty::probe::Probe;
-use lofty::tag::Accessor;
 use serde::Serialize;
 use walkdir::WalkDir;
 
@@ -38,13 +37,6 @@ impl Format {
     }
 }
 
-#[derive(Serialize, Default, Debug)]
-pub struct Tags {
-    pub title: Option<String>,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-}
-
 #[derive(Serialize, Debug)]
 pub struct AudioFileInfo {
     pub path: String,
@@ -58,7 +50,6 @@ pub struct AudioFileInfo {
     pub sample_rate: Option<u32>,
     pub bit_depth: Option<u8>,
     pub channels: Option<u8>,
-    pub tags: Tags,
     /// Problems that would stop the RadioMusic playing this file correctly.
     pub warnings: Vec<String>,
 }
@@ -103,7 +94,6 @@ pub(crate) fn read_file(root: &Path, path: &Path, format: Format, bank: Option<u
         sample_rate: None,
         bit_depth: None,
         channels: None,
-        tags: Tags::default(),
         warnings: Vec::new(),
     };
 
@@ -124,13 +114,6 @@ pub(crate) fn read_file(root: &Path, path: &Path, format: Format, bank: Option<u
             info.bit_depth = props.bit_depth();
             info.channels = props.channels();
 
-            if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
-                info.tags = Tags {
-                    title: tag.title().map(|s| s.into_owned()),
-                    artist: tag.artist().map(|s| s.into_owned()),
-                    album: tag.album().map(|s| s.into_owned()),
-                };
-            }
         }
         Err(e) => info.warnings.push(format!("Could not read file: {e}")),
     }

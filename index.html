@@ -31,7 +31,7 @@
       <table class="results">
         <thead>
           <tr>
-            <th>Bank</th><th>File</th><th>Title</th><th>Artist</th><th>Length</th><th>Format</th><th>Notes</th>
+            <th>Bank</th><th>File</th><th>Length</th><th>Format</th>
           </tr>
         </thead>
         <tbody id="scan-results"></tbody>
@@ -45,8 +45,15 @@
           <span class="path" id="source-path">No folder selected</span>
           <button type="button" class="btn" id="rescan-source" disabled>Rescan</button>
         </div>
-        <section class="options">
-          <label class="check"><input type="checkbox" id="show-ineligible" /> Show ineligible files</label>
+        <section class="filters" id="source-filters">
+          <input type="search" id="f-search" placeholder="Search file name or folder…" spellcheck="false" autocomplete="off" />
+          <label class="field"><span class="label-mono">Min</span><input type="text" id="f-min" placeholder="0:00" size="5" inputmode="numeric" /></label>
+          <label class="field"><span class="label-mono">Max</span><input type="text" id="f-max" placeholder="any" size="5" inputmode="numeric" /></label>
+          <label class="field"><span class="label-mono">Format</span>
+            <select id="f-format"><option value="">Any</option><option value="wav">WAV</option><option value="aiff">AIFF</option><option value="raw">RAW</option></select>
+          </label>
+          <label class="check"><input type="checkbox" id="show-ineligible" /> Show ineligible</label>
+          <button type="button" class="btn" id="f-clear" disabled>Clear</button>
         </section>
         <p class="summary" id="source-summary"></p>
         <div class="source-layout">
@@ -54,7 +61,7 @@
           <table class="results">
           <thead>
             <tr>
-              <th>File</th><th>Title</th><th>Artist</th><th>Length</th><th>Format</th><th>Notes</th>
+              <th data-sort="file">File</th><th data-sort="length">Length</th><th>Format</th>
             </tr>
           </thead>
           <tbody id="source-results"></tbody>
