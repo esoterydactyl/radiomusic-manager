@@ -1,6 +1,7 @@
 mod card;
 mod disk;
 mod scan;
+mod settings;
 mod source;
 mod volumes;
 
@@ -88,6 +89,31 @@ async fn preview_card_changes(
         .map_err(|e| e.to_string())?
 }
 
+/// The Radio Music's settings: names, allowed values, defaults and help text.
+#[tauri::command]
+fn settings_schema() -> Vec<settings::SettingDef> {
+    settings::schema()
+}
+
+/// Reads `settings.txt` from the card root (an empty result if there isn't one).
+#[tauri::command]
+async fn read_card_settings(card_path: String) -> Result<settings::CardSettings, String> {
+    tauri::async_runtime::spawn_blocking(move || settings::read(std::path::Path::new(&card_path)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Saves the given settings into the card's root `settings.txt`, keeping its comments and other lines.
+#[tauri::command]
+async fn write_card_settings(
+    card_path: String,
+    values: std::collections::BTreeMap<String, i64>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || settings::write(std::path::Path::new(&card_path), &values))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Stops a running `write_card` after the current chunk, removing the partly written file.
 #[tauri::command]
 fn cancel_write() {
@@ -99,7 +125,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![list_volumes, scan_directory, scan_source, plan_card, write_card, preview_card_changes, cancel_write, format_card])
+        .invoke_handler(tauri::generate_handler![list_volumes, scan_directory, scan_source, plan_card, write_card, preview_card_changes, cancel_write, format_card, settings_schema, read_card_settings, write_card_settings])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -171,10 +171,24 @@ function select(mount: string | null) {
   renderPicker();
   clearResults();
   updateBuildPanel();
+  void loadCardSettings();
   if (mount) void scanSelected();
 }
 
+let refreshingVolumes = false;
+
 async function refreshVolumes() {
+  // A slow or wedged card can make one refresh take a while; don't stack more behind it.
+  if (refreshingVolumes) return;
+  refreshingVolumes = true;
+  try {
+    await refreshVolumesOnce();
+  } finally {
+    refreshingVolumes = false;
+  }
+}
+
+async function refreshVolumesOnce() {
   try {
     volumes = await invoke<Volume[]>("list_volumes");
   } catch (err) {
@@ -586,6 +600,11 @@ function renderPlan() {
 }
 
 function updateBuildPanel() {
+  if (settingsOnly) {
+    updateSettingsOnlyPanel();
+    return;
+  }
+  ($("#b-write") as HTMLButtonElement).textContent = "Write to card";
   const banks = banksValue();
   $("#b-banks-out").textContent = String(banks);
 
@@ -599,7 +618,7 @@ function updateBuildPanel() {
 
   const wanted = perBank === null ? null : Math.min(banks * perBank, MAX_FILES_TOTAL);
   $("#b-pool").textContent = !sourceScan
-    ? "Choose a source folder in step 2 to draw samples from."
+    ? "Choose a source folder in step 3 to draw samples from."
     : `${pool.length} eligible file${pool.length === 1 ? "" : "s"}` +
       (wanted === null ? "" : ` / ${Math.min(wanted, pool.length)} used`);
 
@@ -610,7 +629,7 @@ function updateBuildPanel() {
 
   // Say why Write is unavailable instead of leaving a silently dimmed button.
   let reason = "";
-  if (!sourceScan) reason = "Choose a source folder in step 2";
+  if (!sourceScan) reason = "Choose a source folder in step 3";
   else if (pool.length === 0) reason = "No eligible files in the pool";
   else if (!plan) reason = "Press Roll to pick a random selection";
   else if (!vol) reason = "Select a card in step 1";
@@ -793,6 +812,16 @@ async function writePlan() {
     renderPlan();
     // Formatting can remount the card under a new path, so re-read the volume list first.
     await refreshVolumes();
+    let settingsNote = "";
+    if ($<HTMLInputElement>("#b-settings").checked && selectedVolume()) {
+      try {
+        await writeSettingsToCard();
+        settingsNote = " · settings.txt written";
+      } catch (err) {
+        settingsNote = ` · settings.txt NOT written (${err})`;
+      }
+    }
+    if (settingsNote) $("#b-status").textContent += settingsNote;
     await scanSelected();
   } catch (err) {
     setBuildStatus(`Error: ${err}`, true);
@@ -895,10 +924,305 @@ async function formatSelected() {
   }
 }
 
+// ---- Settings ---------------------------------------------------------------
+
+type SettingKind =
+  | { type: "choice"; options: { value: number; label: string }[] }
+  | { type: "toggle" }
+  | { type: "number"; min: number; max: number; unit: string };
+type SettingDef = { key: string; label: string; group: string; help: string; default: number; common: boolean } & SettingKind;
+
+interface CardSettings {
+  exists: boolean;
+  values: Record<string, number>;
+  unknown: string[];
+  warnings: string[];
+}
+
+let settingsSchema: SettingDef[] = [];
+let settingsDraft: Record<string, number> = {}; // current value of every setting
+let settingsBaseline: Record<string, number> = {}; // as last loaded or saved, to tell what was edited
+let settingsInFile = new Set<string>(); // settings present in the card's settings.txt
+let settingsFileExists = false;
+let settingsDirty = false;
+let settingsSaved = false;
+let settingsIncludeTouched = false;
+
+// "Skip (write settings only)": Build Card updates settings.txt and leaves the audio alone.
+let settingsOnly = false;
+const SKIP_KEY = "radiomusic-manager:settingsOnly";
+
+function setSettingsOnly(on: boolean) {
+  settingsOnly = on;
+  $<HTMLInputElement>("#skip-files").checked = on;
+  $<HTMLInputElement>("#b-skip").checked = on;
+  $("#app").classList.toggle("settings-only", on);
+  try {
+    localStorage.setItem(SKIP_KEY, on ? "1" : "0");
+  } catch {
+    // storage unavailable; the choice just won't be remembered
+  }
+  delete $("#b-status").dataset.sticky;
+  $("#b-status").textContent = "";
+  updateBuildPanel();
+}
+
+function updateSettingsOnlyPanel() {
+  const vol = selectedVolume();
+  const count = Object.keys(settingsToWrite()).length;
+  const label = vol ? vol.name || vol.mount_point : "";
+  const write = $("#b-write") as HTMLButtonElement;
+  write.textContent = "Write settings";
+  write.disabled = writing || formatting || !vol || settingsSchema.length === 0;
+  write.title = !vol ? "Select a card in step 1" : "";
+  ($("#b-cancel") as HTMLElement).hidden = true;
+  $("#b-skip-note").textContent = !vol
+    ? "Select a card in step 1, then write your settings to it."
+    : `${count} setting${count === 1 ? "" : "s"} will be written to settings.txt on ${label}. No audio is touched, and nothing is formatted or deleted.`;
+  updateTabs();
+  updateFormatPanel();
+}
+
+async function writeSettingsOnly() {
+  const vol = selectedVolume();
+  if (!vol || writing || formatting) return;
+  if (Object.keys(settingsToWrite()).length === 0) {
+    setBuildStatus("Nothing to write: every setting is at its default and the card has no settings.txt.", true);
+    return;
+  }
+  try {
+    const n = await writeSettingsToCard();
+    setBuildStatus(`Wrote ${n} setting${n === 1 ? "" : "s"} to settings.txt on ${vol.name || vol.mount_point}. Audio was not touched.`, true);
+  } catch (err) {
+    setBuildStatus(`Error: ${err}`, true);
+  }
+  updateBuildPanel();
+}
+
+function settingsDefaults(): Record<string, number> {
+  return Object.fromEntries(settingsSchema.map((d) => [d.key, d.default]));
+}
+
+function recomputeSettingsDirty() {
+  settingsDirty = settingsSchema.some((d) => settingsDraft[d.key] !== settingsBaseline[d.key]);
+}
+
+function settingRow(def: SettingDef): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "set-row";
+  row.dataset.key = def.key;
+
+  const head = document.createElement("div");
+  head.className = "set-head";
+  const label = Object.assign(document.createElement("label"), { className: "set-label", textContent: def.label });
+  const mod = Object.assign(document.createElement("span"), { className: "set-mod", title: "Different from the default" });
+  const reset = Object.assign(document.createElement("button"), { type: "button", className: "set-reset", textContent: "default" });
+  reset.title = "Back to the default";
+  head.append(label, mod, reset);
+
+  const control = document.createElement("div");
+  control.className = "set-control";
+  const id = `set-${def.key}`;
+  label.htmlFor = id;
+
+  const commit = (v: number) => {
+    settingsDraft[def.key] = v;
+    recomputeSettingsDirty();
+    refreshSettingsUi();
+  };
+
+  if (def.type === "choice") {
+    const sel = document.createElement("select");
+    sel.id = id;
+    for (const o of def.options) sel.append(new Option(`${o.label}${o.value === def.default ? "  (default)" : ""}`, String(o.value)));
+    sel.addEventListener("change", () => commit(Number(sel.value)));
+    control.append(sel);
+  } else if (def.type === "toggle") {
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.id = id;
+    box.addEventListener("change", () => commit(box.checked ? 1 : 0));
+    control.append(box, Object.assign(document.createElement("span"), { className: "set-unit", textContent: def.default ? "on by default" : "off by default" }));
+  } else {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.id = id;
+    input.inputMode = "numeric";
+    input.addEventListener("input", () => {
+      const t = input.value.trim();
+      const n = /^-?\d+$/.test(t) ? Number(t) : NaN;
+      const ok = Number.isInteger(n) && n >= def.min && n <= def.max;
+      input.setAttribute("aria-invalid", String(!ok));
+      if (ok) commit(n);
+    });
+    control.append(
+      input,
+      Object.assign(document.createElement("span"), {
+        className: "set-unit",
+        textContent: `${def.unit ? def.unit + " · " : ""}${def.min} to ${def.max} · default ${def.default}`,
+      }),
+    );
+  }
+
+  reset.addEventListener("click", () => {
+    settingsDraft[def.key] = def.default;
+    recomputeSettingsDirty();
+    refreshSettingsUi(true);
+  });
+
+  row.append(head, control, Object.assign(document.createElement("p"), { className: "set-help", textContent: def.help }));
+  return row;
+}
+
+function renderSettingsForm() {
+  const build = (defs: SettingDef[], into: HTMLElement) => {
+    const groups = new Map<string, SettingDef[]>();
+    for (const d of defs) groups.set(d.group, [...(groups.get(d.group) ?? []), d]);
+    into.replaceChildren(
+      ...[...groups.entries()].map(([name, items]) => {
+        const fs = document.createElement("fieldset");
+        fs.className = "set-group";
+        fs.append(Object.assign(document.createElement("legend"), { textContent: name }), ...items.map(settingRow));
+        return fs;
+      }),
+    );
+  };
+  build(settingsSchema.filter((d) => d.common), $("#settings-form"));
+  build(settingsSchema.filter((d) => !d.common), $("#settings-form-more"));
+}
+
+/** Push the draft into the controls and update the row markers, buttons and status text. */
+function refreshSettingsUi(syncControls = false) {
+  for (const def of settingsSchema) {
+    const row = document.querySelector<HTMLElement>(`.set-row[data-key="${def.key}"]`);
+    if (!row) continue;
+    const value = settingsDraft[def.key];
+    row.classList.toggle("changed", value !== def.default);
+    const el = row.querySelector<HTMLInputElement | HTMLSelectElement>(`#set-${def.key}`);
+    if (el && (syncControls || document.activeElement !== el)) {
+      if (def.type === "toggle") (el as HTMLInputElement).checked = value === 1;
+      else {
+        el.value = String(value);
+        el.removeAttribute("aria-invalid");
+      }
+    }
+  }
+
+  const vol = selectedVolume();
+  const label = vol ? vol.name || vol.mount_point : "";
+  const dirtyNote = settingsDirty ? " · unsaved changes" : "";
+  $("#settings-source").textContent =
+    (!vol
+      ? "No card selected. These are the Radio Music's defaults; pick a card to load its settings.txt."
+      : settingsFileExists
+        ? `settings.txt on ${label} (${settingsInFile.size} setting${settingsInFile.size === 1 ? "" : "s"} set in the file).`
+        : `${label} has no settings.txt, so the Radio Music will use its defaults. Save to create one.`) + dirtyNote;
+
+  const canTouchCard = !!vol && !writing && !formatting;
+  ($("#settings-save") as HTMLButtonElement).disabled = !canTouchCard || (!settingsDirty && settingsFileExists);
+  ($("#settings-load") as HTMLButtonElement).disabled = !canTouchCard || !settingsFileExists;
+
+  // Keep "Write settings.txt" in the Build step sensible unless the user has chosen for themselves.
+  const nonDefault = settingsSchema.some((d) => settingsDraft[d.key] !== d.default);
+  if (!settingsIncludeTouched) $<HTMLInputElement>("#b-settings").checked = settingsFileExists || settingsDirty || nonDefault;
+  updateTabs();
+}
+
+/** Read the selected card's settings.txt. Edits you haven't saved are never overwritten silently. */
+async function loadCardSettings(force = false) {
+  const vol = selectedVolume();
+  // Before the settings list has arrived there is nothing to merge into; initSettings() loads again.
+  if (settingsSchema.length === 0) return;
+  if (!vol || writing || formatting) {
+    refreshSettingsUi();
+    return;
+  }
+  try {
+    const found = await invoke<CardSettings>("read_card_settings", { cardPath: vol.mount_point });
+    settingsFileExists = found.exists;
+    settingsInFile = new Set(Object.keys(found.values));
+    $("#settings-warnings").replaceChildren(
+      ...[
+        ...found.warnings,
+        ...(found.unknown.length ? [`Left alone: ${found.unknown.join(", ")} (not settings this app knows about)`] : []),
+      ].map((w) => Object.assign(document.createElement("li"), { textContent: w })),
+    );
+    if (found.exists && (force || !settingsDirty)) {
+      settingsDraft = { ...settingsDefaults(), ...found.values };
+      settingsBaseline = { ...settingsDraft };
+      settingsDirty = false;
+    } else if (!found.exists) {
+      // A card without settings.txt: keep whatever has been set up here.
+      settingsBaseline = settingsDirty ? settingsBaseline : { ...settingsDraft };
+    }
+  } catch (err) {
+    $("#settings-source").textContent = `Could not read settings.txt: ${err}`;
+    return;
+  }
+  refreshSettingsUi(true);
+}
+
+/** The settings that belong in the file: ones already there, plus anything changed from default. */
+function settingsToWrite(): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const d of settingsSchema) {
+    if (settingsInFile.has(d.key) || settingsDraft[d.key] !== d.default) out[d.key] = settingsDraft[d.key];
+  }
+  return out;
+}
+
+async function writeSettingsToCard(): Promise<number> {
+  const vol = selectedVolume();
+  if (!vol) throw new Error("no card selected");
+  const values = settingsToWrite();
+  await invoke("write_card_settings", { cardPath: vol.mount_point, values });
+  for (const k of Object.keys(values)) settingsInFile.add(k);
+  settingsFileExists = true;
+  settingsBaseline = { ...settingsDraft };
+  settingsDirty = false;
+  settingsSaved = true;
+  refreshSettingsUi();
+  return Object.keys(values).length;
+}
+
+async function saveSettingsClicked() {
+  try {
+    const n = await writeSettingsToCard();
+    $("#settings-warnings").replaceChildren(
+      Object.assign(document.createElement("li"), { textContent: `Saved ${n} setting${n === 1 ? "" : "s"} to settings.txt.` }),
+    );
+  } catch (err) {
+    $("#settings-warnings").replaceChildren(Object.assign(document.createElement("li"), { textContent: `Could not save: ${err}` }));
+  }
+}
+
+async function initSettings() {
+  try {
+    settingsSchema = await invoke<SettingDef[]>("settings_schema");
+  } catch (err) {
+    $("#settings-source").textContent = `Could not load the settings list: ${err}`;
+    return;
+  }
+  settingsDraft = settingsDefaults();
+  settingsBaseline = { ...settingsDraft };
+  renderSettingsForm();
+  refreshSettingsUi(true);
+  $("#settings-save").addEventListener("click", () => void saveSettingsClicked());
+  $("#settings-load").addEventListener("click", () => void loadCardSettings(true));
+  $("#settings-defaults").addEventListener("click", () => {
+    settingsDraft = settingsDefaults();
+    recomputeSettingsDirty();
+    refreshSettingsUi(true);
+  });
+  $("#b-settings").addEventListener("change", () => (settingsIncludeTouched = true));
+  // A card may already have been selected while the list was loading.
+  void loadCardSettings(true);
+}
+
 // ---- Workflow tabs ----------------------------------------------------------
 
-type Step = "card" | "files" | "build";
-const STEPS: Step[] = ["card", "files", "build"];
+type Step = "card" | "settings" | "files" | "build";
+const STEPS: Step[] = ["card", "settings", "files", "build"];
 
 function showStep(step: Step, focus = false) {
   for (const s of STEPS) {
@@ -927,14 +1251,32 @@ function updateTabs() {
     !vol ? "todo" : vol.warnings.length > 0 ? "warn" : "done",
   );
 
-  const pool = poolFiles().length;
-  setStepState("files", sourceScan ? `${pool} eligible file${pool === 1 ? "" : "s"}` : "No folder", pool > 0 ? "done" : "todo");
-
   setStepState(
-    "build",
-    lastWriteOk ? "Card written" : plan ? `${plan.files.length} files rolled` : "Not built",
-    lastWriteOk ? "done" : "todo",
+    "settings",
+    !selected ? "Defaults" : settingsDirty ? "Unsaved changes" : settingsFileExists ? "settings.txt loaded" : "No settings.txt",
+    settingsDirty ? "warn" : settingsFileExists || settingsSaved ? "done" : "todo",
   );
+
+  const pool = poolFiles().length;
+  setStepState(
+    "files",
+    settingsOnly ? "Skipped" : sourceScan ? `${pool} eligible file${pool === 1 ? "" : "s"}` : "No folder",
+    settingsOnly || pool > 0 ? "done" : "todo",
+  );
+
+  if (settingsOnly) {
+    setStepState(
+      "build",
+      settingsDirty ? "Settings · unsaved" : settingsSaved ? "Settings written" : "Settings only",
+      settingsSaved && !settingsDirty ? "done" : "todo",
+    );
+  } else {
+    setStepState(
+      "build",
+      lastWriteOk ? "Card written" : plan ? `${plan.files.length} files rolled` : "Not built",
+      lastWriteOk ? "done" : "todo",
+    );
+  }
 }
 
 function wireTabs() {
@@ -955,6 +1297,15 @@ function wireTabs() {
 
 window.addEventListener("DOMContentLoaded", () => {
   wireTabs();
+  for (const id of ["#skip-files", "#b-skip"]) {
+    $(id).addEventListener("change", (e) => setSettingsOnly((e.target as HTMLInputElement).checked));
+  }
+  try {
+    if (localStorage.getItem(SKIP_KEY) === "1") setSettingsOnly(true);
+  } catch {
+    // storage unavailable
+  }
+  void initSettings();
   const prefs = loadPrefs();
   $<HTMLInputElement>("#auto-select").checked = prefs.autoSelect;
   $<HTMLInputElement>("#show-all").checked = prefs.showAll;
@@ -1020,7 +1371,7 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   $("#b-roll").addEventListener("click", () => void roll());
-  $("#b-write").addEventListener("click", () => void writePlan());
+  $("#b-write").addEventListener("click", () => void (settingsOnly ? writeSettingsOnly() : writePlan()));
   $("#b-cancel").addEventListener("click", () => {
     setBuildStatus("Cancelling after the current chunk…", true);
     void invoke("cancel_write");

@@ -10,7 +10,7 @@
   </head>
 
   <body>
-    <main class="app">
+    <main class="app" id="app">
       <header class="masthead">
         <div class="wordmark">Radiomusic <span class="e">Manager</span></div>
         <div class="eyebrow">From Ecotone Labs</div>
@@ -22,13 +22,18 @@
           <span class="step-body"><span class="step-title">Select Card</span><span class="step-meta" id="meta-card">No card</span></span>
           <span class="step-dot" id="dot-card" data-state="todo"></span>
         </button>
-        <button type="button" class="step" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1" data-step="files">
+        <button type="button" class="step" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1" data-step="settings">
           <span class="step-num">02</span>
+          <span class="step-body"><span class="step-title">Settings</span><span class="step-meta" id="meta-settings">Defaults</span></span>
+          <span class="step-dot" id="dot-settings" data-state="todo"></span>
+        </button>
+        <button type="button" class="step" role="tab" id="tab-files" aria-controls="panel-files" aria-selected="false" tabindex="-1" data-step="files">
+          <span class="step-num">03</span>
           <span class="step-body"><span class="step-title">Select Files</span><span class="step-meta" id="meta-files">No folder</span></span>
           <span class="step-dot" id="dot-files" data-state="todo"></span>
         </button>
         <button type="button" class="step" role="tab" id="tab-build" aria-controls="panel-build" aria-selected="false" tabindex="-1" data-step="build">
-          <span class="step-num">03</span>
+          <span class="step-num">04</span>
           <span class="step-body"><span class="step-title">Build Card</span><span class="step-meta" id="meta-build">Not built</span></span>
           <span class="step-dot" id="dot-build" data-state="todo"></span>
         </button>
@@ -74,11 +79,33 @@
       </table></div>
         <div class="panel-nav">
           <span></span>
+          <button type="button" class="btn" data-goto="settings">Next: Settings &rarr;</button>
+        </div>
+      </section>
+
+      <section class="panel" role="tabpanel" id="panel-settings" aria-labelledby="tab-settings" hidden>
+        <div class="settings-bar">
+          <span class="settings-source" id="settings-source">Showing the Radio Music's default settings.</span>
+          <button type="button" class="btn" id="settings-load" disabled>Load from card</button>
+          <button type="button" class="btn" id="settings-defaults">Reset all to defaults</button>
+          <button type="button" class="btn" id="settings-save" disabled>Save to card</button>
+        </div>
+        <ul class="warnings" id="settings-warnings"></ul>
+        <div id="settings-form" class="settings-form"></div>
+        <details class="settings-more" id="settings-more">
+          <summary>More settings</summary>
+          <div id="settings-form-more" class="settings-form"></div>
+        </details>
+        <div class="panel-nav">
+          <button type="button" class="btn" data-goto="card">&larr; Select Card</button>
           <button type="button" class="btn" data-goto="files">Next: Select Files &rarr;</button>
         </div>
       </section>
 
       <section class="panel" role="tabpanel" id="panel-files" aria-labelledby="tab-files" hidden>
+        <label class="check skip-row"><input type="checkbox" id="skip-files" /> Skip (write settings only)</label>
+        <p class="summary only-settings" id="skip-note">Files are skipped. Build Card will only update settings.txt on the card; no audio is selected, copied or removed.</p>
+        <div id="files-body">
         <div class="card-bar">
           <button type="button" class="btn" id="choose-source">Choose folder…</button>
           <span class="path" id="source-path">No folder selected</span>
@@ -106,37 +133,41 @@
           <tbody id="source-results"></tbody>
         </table></div>
         </div>
+        </div>
         <div class="panel-nav">
-          <button type="button" class="btn" data-goto="card">&larr; Select Card</button>
+          <button type="button" class="btn" data-goto="settings">&larr; Settings</button>
           <button type="button" class="btn" data-goto="build">Next: Build Card &rarr;</button>
         </div>
       </section>
 
       <section class="panel" role="tabpanel" id="panel-build" aria-labelledby="tab-build" hidden>
         <div class="build-controls">
-          <label class="field"><span class="label-mono">Banks</span>
+          <label class="check skip-row"><input type="checkbox" id="b-skip" /> Skip (write settings only)</label>
+          <label class="field only-files"><span class="label-mono">Banks</span>
             <input type="range" id="b-banks" min="1" max="16" value="1" />
             <output id="b-banks-out">1</output>
           </label>
-          <label class="field"><span class="label-mono">Files per bank</span>
+          <label class="field only-files"><span class="label-mono">Files per bank</span>
             <input type="text" id="b-per" value="250" size="4" inputmode="numeric" />
           </label>
-          <label class="field"><span class="label-mono">If card has audio</span>
+          <label class="field only-files"><span class="label-mono">If card has audio</span>
             <select id="b-existing">
               <option value="refuse">Stop</option>
               <option value="replace">Erase Existing Audio</option>
               <option value="add">Add new files</option>
             </select>
           </label>
-          <button type="button" class="btn" id="b-roll" disabled>Roll</button>
+          <label class="check only-files" title="Erasing formats the card, which removes its settings.txt. This puts the settings from step 2 back."><input type="checkbox" id="b-settings" /> Write settings.txt</label>
+          <button type="button" class="btn only-files" id="b-roll" disabled>Roll</button>
           <button type="button" class="cta" id="b-write" disabled>Write to card</button>
           <button type="button" class="btn danger" id="b-cancel" hidden>Cancel</button>
         </div>
         <div class="progress" id="b-progress" hidden><div class="progress-fill" id="b-bar"></div></div>
-        <p class="summary" id="b-pool"></p>
+        <p class="summary only-files" id="b-pool"></p>
+        <p class="summary only-settings" id="b-skip-note"></p>
         <p class="summary" id="b-status"></p>
         <ul class="warnings" id="b-warnings"></ul>
-        <div class="build-plan">
+        <div class="build-plan only-files">
           <table class="results" id="b-banks-table" aria-label="Banks">
             <thead><tr><th>Bank</th><th>Files</th><th>Size</th><th>Status</th></tr></thead>
             <tbody id="b-banks-body"></tbody>

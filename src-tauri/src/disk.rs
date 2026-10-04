@@ -94,6 +94,7 @@ mod mac {
     use serde_json::Value;
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::time::Instant;
 
     fn plist_to_json(bytes: &[u8]) -> Result<Value, String> {
         let mut child = Command::new("plutil")
@@ -113,15 +114,42 @@ mod mac {
         serde_json::from_slice(&out.stdout).map_err(|e| format!("plutil output: {e}"))
     }
 
+    /// Information calls must never hang the app: a card that is busy or wedged can leave
+    /// `diskutil info` waiting indefinitely, so give up after a few seconds.
+    const INFO_TIMEOUT: Duration = Duration::from_secs(6);
+
     fn diskutil_json(args: &[&str]) -> Result<Value, String> {
-        let out = Command::new("diskutil")
+        let mut child = Command::new("diskutil")
             .args(args)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| format!("diskutil: {e}"))?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        let mut stdout = child.stdout.take().ok_or("diskutil: no output")?;
+        // Read on another thread so a full pipe can't stall the child while we wait on it.
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
+            buf
+        });
+
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait().map_err(|e| format!("diskutil: {e}"))? {
+                Some(status) => break status,
+                None if started.elapsed() > INFO_TIMEOUT => {
+                    let _ = child.kill();
+                    // Don't join the reader: if the process is stuck in the kernel it may never close.
+                    return Err("diskutil timed out; the card may be busy".into());
+                }
+                None => std::thread::sleep(Duration::from_millis(40)),
+            }
+        };
+        let bytes = reader.join().map_err(|_| "diskutil: reader failed".to_string())?;
+        if !status.success() {
+            return Err("diskutil reported an error".into());
         }
-        plist_to_json(&out.stdout)
+        plist_to_json(&bytes)
     }
 
     fn str_of<'a>(v: &'a Value, k: &str) -> &'a str {
