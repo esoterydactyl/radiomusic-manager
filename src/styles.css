@@ -50,6 +50,8 @@ body::before {
   text-transform: uppercase;
   color: var(--ink-faint);
 }
+a.eyebrow { text-decoration: none; }
+a.eyebrow:hover { color: var(--ink); text-decoration: underline; }
 
 .card-bar { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-3); }
 .options { display: flex; gap: var(--sp-5); margin-bottom: var(--sp-4); }

@@ -26,6 +26,7 @@ walkdir = "2.5.0"
 sysinfo = "0.39.6"
 tauri-plugin-dialog = "2.8.1"
 rand = "0.10.3"
+tauri-plugin-opener = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

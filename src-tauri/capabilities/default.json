@@ -5,6 +5,10 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://ecotone-labs.com" }]
+    },
     "dialog:allow-open",
     "dialog:allow-ask"
   ]

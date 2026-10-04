@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { closePreview, currentPreviewPath, initPreview, openPreview, refreshLevels, syncDock, trimLabel, trims, trimsSignature, type NormalizeChoice } from "./preview";
 import { compareBy, isFiltering, matches, NO_FILTERS, parseDuration, type Filters, type SortKey } from "./filters";
 
@@ -1375,6 +1376,12 @@ function wireTabs() {
 
 window.addEventListener("DOMContentLoaded", () => {
   wireTabs();
+  // The webview won't navigate to external sites; hand the link to the system browser.
+  const ecotone = $<HTMLAnchorElement>("#ecotone-link");
+  ecotone.addEventListener("click", (e) => {
+    e.preventDefault();
+    void openUrl(ecotone.getAttribute("href")!);
+  });
   initPreview({
     onTrimChange: () => {
       renderSource();
