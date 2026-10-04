@@ -1,7 +1,7 @@
 // Pure filtering/sorting for the source library. No DOM access, so it can be
 // exercised directly (e.g. `node --experimental-strip-types`).
 
-export interface Filterable {
+interface Filterable {
   relative_path: string;
   format: string;
   duration_secs: number | null;

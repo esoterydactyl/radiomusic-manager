@@ -121,7 +121,6 @@ select:focus { border-color: var(--line-strong); }
 .results tr:hover td { background: var(--bg-2); }
 .results td.dim { color: var(--ink-faint); }
 
-.section-head { margin-bottom: var(--sp-4); }
 .path { flex: 1; color: var(--ink-faint); font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Secondary button: hairline, no accent (the accent is reserved for the one CTA) */

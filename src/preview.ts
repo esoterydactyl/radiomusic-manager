@@ -7,7 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { parseDuration } from "./filters";
 
-export interface Trim {
+interface Trim {
   start: number;
   end: number;
 }
@@ -75,7 +75,7 @@ export function currentPreviewPath(): string | null {
   return current?.path ?? loadingPath;
 }
 
-export function fmtTime(secs: number): string {
+function fmtTime(secs: number): string {
   const s = Math.max(0, secs);
   const m = Math.floor(s / 60);
   return `${m}:${(s - m * 60).toFixed(1).padStart(4, "0")}`;
