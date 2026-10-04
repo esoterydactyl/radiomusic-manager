@@ -17,6 +17,7 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 
+use crate::audio::{self, NormMode, Trim};
 use crate::{scan, volumes};
 
 pub const MAX_BANKS: usize = 16;
@@ -30,6 +31,9 @@ const MAX_NAME_CHARS: usize = 100;
 pub struct Candidate {
     pub path: String,
     pub size_bytes: u64,
+    /// Only this part of the file goes on the card.
+    #[serde(default)]
+    pub trim: Option<Trim>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -40,15 +44,32 @@ pub struct PlannedFile {
     pub size_bytes: u64,
     /// Bank number 0-15, or `None` when files go in the card root.
     pub bank: Option<u8>,
+    /// Only this part of the source is written (then `render` is set).
+    #[serde(default)]
+    pub trim: Option<Trim>,
+    /// Written as a freshly rendered WAV (trimmed and/or normalized) instead of a byte-for-byte copy.
+    #[serde(default)]
+    pub render: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Plan {
     pub seed: u64,
     pub banks: usize,
     pub files: Vec<PlannedFile>,
     pub total_bytes: u64,
     pub warnings: Vec<String>,
+    /// Loudness matching applied to every file written, if any.
+    #[serde(default)]
+    pub normalize: Option<NormMode>,
+    /// What the card was said to hold when this was planned, if known.
+    #[serde(default)]
+    pub capacity_bytes: Option<u64>,
+    /// How many files and bytes were wanted before "fit to card" trimmed the selection.
+    #[serde(default)]
+    pub requested_files: usize,
+    #[serde(default)]
+    pub requested_bytes: u64,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -122,6 +143,14 @@ fn unique_name(name: String, taken: &mut HashSet<String>) -> String {
     unreachable!()
 }
 
+/// `kick.aif` -> `kick.wav` (an extensionless name just gains `.wav`).
+fn with_wav_extension(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => format!("{stem}.wav"),
+        _ => format!("{name}.wav"),
+    }
+}
+
 fn bank_dir(banks: usize, bank: usize) -> String {
     if banks == 1 {
         String::new()
@@ -130,13 +159,32 @@ fn bank_dir(banks: usize, bank: usize) -> String {
     }
 }
 
-/// Randomly choose and distribute files across `banks` banks.
+/// Randomly choose and distribute files across `banks` banks, ignoring card capacity.
+#[cfg(test)]
 pub fn plan(
     candidates: Vec<Candidate>,
     banks: usize,
     files_per_bank: usize,
     seed: u64,
     max_file_bytes: Option<u64>,
+    normalize: Option<NormMode>,
+) -> Result<Plan, String> {
+    plan_for_capacity(candidates, banks, files_per_bank, seed, max_file_bytes, normalize, None, false)
+}
+
+/// As `plan`, but aware of how many bytes the card can hold. With `fit`, files are taken in the
+/// random order until the card is full instead of overshooting; without it, an over-size plan is
+/// returned as asked so the caller can show that it is too big.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_for_capacity(
+    candidates: Vec<Candidate>,
+    banks: usize,
+    files_per_bank: usize,
+    seed: u64,
+    max_file_bytes: Option<u64>,
+    normalize: Option<NormMode>,
+    capacity_bytes: Option<u64>,
+    fit: bool,
 ) -> Result<Plan, String> {
     if !(1..=MAX_BANKS).contains(&banks) {
         return Err(format!("Banks must be between 1 and {MAX_BANKS}"));
@@ -148,6 +196,29 @@ pub fn plan(
     let mut warnings = Vec::new();
     let mut seen = HashSet::new();
     let mut pool: Vec<Candidate> = candidates.into_iter().filter(|c| seen.insert(c.path.clone())).collect();
+
+    // Trimmed or normalized files are re-rendered, so their size on the card differs from the source
+    // (a long file trimmed short may now fit a FAT32 card). Work that size out before any size checks.
+    let mut rendered = std::collections::HashSet::new();
+    if normalize.is_some() || pool.iter().any(|c| c.trim.is_some()) {
+        let before = pool.len();
+        let mut kept = Vec::with_capacity(before);
+        for mut c in pool {
+            if c.trim.is_none() && normalize.is_none() {
+                kept.push(c);
+                continue;
+            }
+            let Ok(pf) = audio::PcmFile::open(Path::new(&c.path)) else { continue };
+            c.size_bytes = audio::rendered_size(&pf, c.trim)
+                .map_err(|e| format!("{}: {e}", Path::new(&c.path).file_name().map(|n| n.to_string_lossy()).unwrap_or_default()))?;
+            rendered.insert(c.path.clone());
+            kept.push(c);
+        }
+        if kept.len() < before {
+            warnings.push(format!("{} file(s) couldn't be read for trimming or normalizing and were left out", before - kept.len()));
+        }
+        pool = kept;
+    }
 
     if let Some(max) = max_file_bytes {
         let before = pool.len();
@@ -179,7 +250,36 @@ pub fn plan(
     pool.sort_by(|a, b| a.path.cmp(&b.path));
     let mut rng = StdRng::seed_from_u64(seed);
     pool.shuffle(&mut rng);
-    pool.truncate(wanted);
+
+    let requested_files = pool.len().min(wanted);
+    let requested_bytes: u64 = pool.iter().take(wanted).map(|c| c.size_bytes).sum();
+    match capacity_bytes {
+        // Take files in their random order while they fit; a file that is too big is skipped so
+        // smaller ones can still fill the space.
+        Some(cap) if fit => {
+            let mut used = 0u64;
+            let mut kept = Vec::new();
+            for c in pool {
+                if kept.len() >= wanted {
+                    break;
+                }
+                if used + c.size_bytes <= cap {
+                    used += c.size_bytes;
+                    kept.push(c);
+                }
+            }
+            if kept.len() < requested_files {
+                warnings.push(format!(
+                    "Trimmed to fit the card: {} of the {requested_files} files wanted ({} MB of {} MB)",
+                    kept.len(),
+                    used / 1_000_000,
+                    cap / 1_000_000
+                ));
+            }
+            pool = kept;
+        }
+        _ => pool.truncate(wanted),
+    }
 
     // Deal round-robin so banks end up within one file of each other.
     let mut taken: Vec<HashSet<String>> = vec![HashSet::new(); banks];
@@ -190,20 +290,26 @@ pub fn plan(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let name = unique_name(sanitize_name(&original), &mut taken[bank]);
+        let render = rendered.contains(&c.path);
+        let clean = sanitize_name(&original);
+        // A rendered file is always a WAV, whatever it started as.
+        let clean = if render { with_wav_extension(&clean) } else { clean };
+        let name = unique_name(clean, &mut taken[bank]);
         let dir = bank_dir(banks, bank);
         files.push(PlannedFile {
             src: c.path,
             dest: if dir.is_empty() { name } else { format!("{dir}/{name}") },
             size_bytes: c.size_bytes,
             bank: (banks > 1).then_some(bank as u8),
+            trim: if render { c.trim } else { None },
+            render,
         });
     }
     // Present bank by bank, each in the name order the firmware will use.
     files.sort_by(|a, b| (a.bank, a.dest.to_lowercase()).cmp(&(b.bank, b.dest.to_lowercase())));
 
     let total_bytes = files.iter().map(|f| f.size_bytes).sum();
-    Ok(Plan { seed, banks, files, total_bytes, warnings })
+    Ok(Plan { seed, banks, files, total_bytes, warnings, normalize, capacity_bytes, requested_files, requested_bytes })
 }
 
 /// Destination must be a plain relative path with no way out of the card root.
@@ -588,10 +694,19 @@ pub fn write(
                 bytes_in_file.store(0, Ordering::Relaxed);
                 publish(snapshot(bytes_before, i, done_in_bank));
 
-                let result = copy_file(Path::new(&f.src), &dest, |copied| {
+                let on_chunk = |copied: u64| {
                     bytes_in_file.store(copied, Ordering::Relaxed);
                     !CANCEL.load(Ordering::SeqCst)
-                });
+                };
+                let result = if f.render {
+                    // Trimmed and/or normalized: render a new WAV instead of copying the bytes.
+                    match audio::PcmFile::open(Path::new(&f.src)) {
+                        Ok(pf) => audio::render(&pf, &dest, audio::RenderOpts { trim: f.trim, normalize: plan.normalize }, on_chunk),
+                        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                    }
+                } else {
+                    copy_file(Path::new(&f.src), &dest, on_chunk)
+                };
                 match result {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
@@ -620,7 +735,7 @@ mod tests {
 
     fn cands(n: usize) -> Vec<Candidate> {
         (0..n)
-            .map(|i| Candidate { path: format!("/lib/f{i:03}.wav"), size_bytes: 1_000 })
+            .map(|i| Candidate { path: format!("/lib/f{i:03}.wav"), size_bytes: 1_000, trim: None })
             .collect()
     }
 
@@ -644,14 +759,14 @@ mod tests {
 
     #[test]
     fn single_bank_uses_root() {
-        let p = plan(cands(10), 1, 5, 1, None).unwrap();
+        let p = plan(cands(10), 1, 5, 1, None, None).unwrap();
         assert_eq!(p.files.len(), 5);
         assert!(p.files.iter().all(|f| f.bank.is_none() && !f.dest.contains('/')));
     }
 
     #[test]
     fn multiple_banks_are_even_and_numbered() {
-        let p = plan(cands(100), 4, 10, 7, None).unwrap();
+        let p = plan(cands(100), 4, 10, 7, None, None).unwrap();
         assert_eq!(p.files.len(), 40);
         for b in 0..4u8 {
             let n = p.files.iter().filter(|f| f.bank == Some(b)).count();
@@ -662,34 +777,34 @@ mod tests {
 
     #[test]
     fn limits_are_enforced() {
-        let p = plan(cands(2000), 16, 250, 3, None).unwrap();
+        let p = plan(cands(2000), 16, 250, 3, None, None).unwrap();
         assert_eq!(p.files.len(), MAX_FILES_TOTAL);
         assert!(p.warnings.iter().any(|w| w.contains("800")));
-        assert!(plan(cands(5), 0, 1, 1, None).is_err());
-        assert!(plan(cands(5), 17, 1, 1, None).is_err());
-        assert!(plan(cands(5), 1, 0, 1, None).is_err());
+        assert!(plan(cands(5), 0, 1, 1, None, None).is_err());
+        assert!(plan(cands(5), 17, 1, 1, None, None).is_err());
+        assert!(plan(cands(5), 1, 0, 1, None, None).is_err());
     }
 
     #[test]
     fn same_seed_same_plan_different_seed_differs() {
-        let a = plan(cands(60), 3, 10, 42, None).unwrap();
+        let a = plan(cands(60), 3, 10, 42, None, None).unwrap();
         let mut reversed = cands(60);
         reversed.reverse();
-        let b = plan(reversed, 3, 10, 42, None).unwrap();
+        let b = plan(reversed, 3, 10, 42, None, None).unwrap();
         assert_eq!(a.files, b.files);
-        let c = plan(cands(60), 3, 10, 43, None).unwrap();
+        let c = plan(cands(60), 3, 10, 43, None, None).unwrap();
         assert_ne!(a.files, c.files);
     }
 
     #[test]
     fn short_pool_warns_and_oversize_files_are_dropped() {
-        let p = plan(cands(3), 2, 10, 1, None).unwrap();
+        let p = plan(cands(3), 2, 10, 1, None, None).unwrap();
         assert_eq!(p.files.len(), 3);
         assert!(p.warnings.iter().any(|w| w.contains("Only 3")));
 
         let mut c = cands(2);
         c[0].size_bytes = FAT32_MAX_FILE_BYTES + 1;
-        let p = plan(c, 1, 5, 1, Some(FAT32_MAX_FILE_BYTES)).unwrap();
+        let p = plan(c, 1, 5, 1, Some(FAT32_MAX_FILE_BYTES), None).unwrap();
         assert_eq!(p.files.len(), 1);
     }
 
@@ -720,7 +835,7 @@ mod tests {
     }
 
     fn planned(dest: &str, size: u64, bank: Option<u8>) -> PlannedFile {
-        PlannedFile { src: String::new(), dest: dest.into(), size_bytes: size, bank }
+        PlannedFile { src: String::new(), dest: dest.into(), size_bytes: size, bank, trim: None, render: false }
     }
 
     /// A card with three audio files plus things that must never be touched.
@@ -753,8 +868,7 @@ mod tests {
                 planned("02/new.raw", 50, Some(2)),
             ],
             total_bytes: 350,
-            warnings: vec![],
-        }
+            warnings: vec![], normalize: None, ..Default::default() }
     }
 
     #[test]
@@ -826,8 +940,7 @@ mod tests {
             banks: 2,
             files: vec![planned("00/extra.raw", 4, Some(0)), planned("01/ok.raw", 4, Some(1))],
             total_bytes: 8,
-            warnings: vec![],
-        };
+            warnings: vec![], normalize: None, ..Default::default() };
         let err = compute_changes(&card, &plan, Existing::Add).err().expect("over the bank limit");
         assert!(err.contains("bank 00") && err.contains("250"), "{err}");
         // Erasing first makes the same plan fine.
@@ -839,7 +952,7 @@ mod tests {
     fn add_mode_warns_when_layouts_differ() {
         let card = messy_card("layout");
         // Existing audio is in bank folders; this plan puts files in the root.
-        let plan = Plan { seed: 0, banks: 1, files: vec![planned("root.raw", 10, None)], total_bytes: 10, warnings: vec![] };
+        let plan = Plan { seed: 0, banks: 1, files: vec![planned("root.raw", 10, None)], total_bytes: 10, warnings: vec![], normalize: None, ..Default::default() };
         let c = compute_changes(&card, &plan, Existing::Add).unwrap();
         assert_eq!(c.warnings.len(), 1);
         std::fs::remove_dir_all(&card).unwrap();
@@ -871,6 +984,125 @@ mod tests {
         std::fs::remove_dir_all(&card).unwrap();
     }
 
+    /// Writes a small 16-bit mono sine WAV and returns its path.
+    fn wav_file(name: &str, secs: f64) -> String {
+        let rate = 8000u32;
+        let n = (secs * f64::from(rate)) as usize;
+        let data: Vec<u8> = (0..n).flat_map(|i| (((i as f32 * 0.05).sin() * 3000.0) as i16).to_le_bytes()).collect();
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        v.extend_from_slice(b"WAVEfmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&[1, 0, 1, 0]);
+        v.extend_from_slice(&rate.to_le_bytes());
+        v.extend_from_slice(&(rate * 2).to_le_bytes());
+        v.extend_from_slice(&[2, 0, 16, 0]);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(&data);
+        let dir = std::env::temp_dir().join(format!("rmm-plan-audio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, v).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    fn cand(path: &str, trim: Option<Trim>) -> Candidate {
+        Candidate { path: path.to_string(), size_bytes: std::fs::metadata(path).unwrap().len(), trim }
+    }
+
+    #[test]
+    fn trim_shrinks_the_planned_size_and_renders_only_that_file() {
+        let (a, b) = (wav_file("a.wav", 2.0), wav_file("b.wav", 2.0));
+        let trim = Trim { start: 0.5, end: 1.0 };
+        let p = plan(vec![cand(&a, Some(trim)), cand(&b, None)], 1, 5, 1, None, None).unwrap();
+        let fa = p.files.iter().find(|f| f.src == a).unwrap();
+        let fb = p.files.iter().find(|f| f.src == b).unwrap();
+        assert!(fa.render && fa.trim == Some(trim));
+        assert_eq!(fa.size_bytes, 44 + 4000 * 2, "0.5 s at 8 kHz, 16-bit mono, plus the WAV header");
+        assert!(!fb.render && fb.size_bytes == std::fs::metadata(&b).unwrap().len(), "untouched files stay byte copies");
+        assert_eq!(p.total_bytes, fa.size_bytes + fb.size_bytes);
+    }
+
+    #[test]
+    fn normalizing_renders_everything_as_wav() {
+        let (a, b) = (wav_file("n1.wav", 1.0), wav_file("n2.wav", 1.0));
+        let p = plan(vec![cand(&a, None), cand(&b, None)], 1, 5, 2, None, Some(NormMode::Peak)).unwrap();
+        assert_eq!(p.normalize, Some(NormMode::Peak));
+        assert!(p.files.iter().all(|f| f.render && f.dest.ends_with(".wav")));
+        assert!(p.files.iter().all(|f| f.size_bytes == 44 + 8000 * 2));
+    }
+
+    #[test]
+    fn renamed_extensions_and_unique_names() {
+        assert_eq!(with_wav_extension("kick.aif"), "kick.wav");
+        assert_eq!(with_wav_extension("pad.RAW"), "pad.wav");
+        assert_eq!(with_wav_extension("noext"), "noext.wav");
+        assert_eq!(with_wav_extension(".hidden"), ".hidden.wav");
+    }
+
+    #[test]
+    fn trimming_rescues_a_file_that_was_too_big_for_the_card() {
+        let a = wav_file("big.wav", 4.0); // ~64 KB
+        let trim = Trim { start: 0.0, end: 0.5 }; // ~8 KB once trimmed
+        let limit = Some(20_000);
+        assert!(plan(vec![cand(&a, None)], 1, 5, 1, limit, None).unwrap().files.is_empty(), "too big untrimmed");
+        assert_eq!(plan(vec![cand(&a, Some(trim))], 1, 5, 1, limit, None).unwrap().files.len(), 1, "fits once trimmed");
+    }
+
+    #[test]
+    fn unreadable_files_are_dropped_when_processing_and_a_bad_trim_is_an_error() {
+        let ok = wav_file("ok.wav", 1.0);
+        let junk = std::env::temp_dir().join(format!("rmm-junk-{}.wav", std::process::id()));
+        std::fs::write(&junk, b"not audio").unwrap();
+        let junk = junk.to_string_lossy().into_owned();
+        let p = plan(vec![cand(&ok, None), cand(&junk, None)], 1, 5, 1, None, Some(NormMode::Rms)).unwrap();
+        assert_eq!(p.files.len(), 1);
+        assert!(p.warnings.iter().any(|w| w.contains("couldn't be read")));
+
+        let bad = Trim { start: 0.9, end: 0.1 };
+        assert!(plan(vec![cand(&ok, Some(bad))], 1, 5, 1, None, None).is_err());
+    }
+
+    fn sized(n: usize, bytes: u64) -> Vec<Candidate> {
+        (0..n).map(|i| Candidate { path: format!("/lib/s{i:03}.wav"), size_bytes: bytes, trim: None }).collect()
+    }
+
+    #[test]
+    fn fit_to_card_stops_before_the_card_is_full() {
+        // 40 files of 1 MB wanted, but the card holds 25 MB.
+        let p = plan_for_capacity(sized(100, 1_000_000), 4, 10, 5, None, None, Some(25_000_000), true).unwrap();
+        assert_eq!(p.files.len(), 25);
+        assert!(p.total_bytes <= 25_000_000);
+        assert_eq!((p.requested_files, p.requested_bytes), (40, 40_000_000), "records what was asked for");
+        assert_eq!(p.capacity_bytes, Some(25_000_000));
+        assert!(p.warnings.iter().any(|w| w.contains("Trimmed to fit")), "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn without_fit_an_oversize_plan_is_returned_as_asked() {
+        let p = plan_for_capacity(sized(100, 1_000_000), 4, 10, 5, None, None, Some(25_000_000), false).unwrap();
+        assert_eq!(p.files.len(), 40);
+        assert!(p.total_bytes > p.capacity_bytes.unwrap(), "the caller can see it is too big");
+    }
+
+    #[test]
+    fn fit_skips_a_file_that_is_too_big_and_fills_with_smaller_ones() {
+        let mut c = sized(10, 1_000_000);
+        c[0].size_bytes = 50_000_000; // never fits
+        let p = plan_for_capacity(c, 1, 10, 1, None, None, Some(9_500_000), true).unwrap();
+        assert_eq!(p.files.len(), 9);
+        assert!(p.files.iter().all(|f| f.size_bytes == 1_000_000));
+    }
+
+    #[test]
+    fn fit_changes_nothing_when_everything_already_fits() {
+        let fits = plan_for_capacity(sized(10, 1_000), 1, 10, 3, None, None, Some(1_000_000), true).unwrap();
+        let plain = plan(sized(10, 1_000), 1, 10, 3, None, None).unwrap();
+        assert_eq!(fits.files, plain.files);
+        assert!(fits.warnings.is_empty());
+    }
+
     #[test]
     fn rejects_unsafe_destinations() {
         let card = Path::new("/Volumes/CARD");
@@ -890,9 +1122,9 @@ mod tests {
         for i in 0..4 {
             let p = src.join(format!("s{i}.raw"));
             std::fs::write(&p, vec![i as u8; 2_000]).unwrap();
-            cs.push(Candidate { path: p.to_string_lossy().into_owned(), size_bytes: 2_000 });
+            cs.push(Candidate { path: p.to_string_lossy().into_owned(), size_bytes: 2_000, trim: None });
         }
-        let p = plan(cs, 2, 2, 5, None).unwrap();
+        let p = plan(cs, 2, 2, 5, None, None).unwrap();
 
         // A temp dir isn't a mounted volume root, so `write` must refuse it.
         let card = base.join("card");
@@ -929,7 +1161,7 @@ mod real_volume {
         for i in 0..6 {
             let p = src.join(format!("s{i}.raw"));
             std::fs::write(&p, vec![i as u8; size]).unwrap();
-            cs.push(Candidate { path: p.to_string_lossy().into_owned(), size_bytes: size as u64 });
+            cs.push(Candidate { path: p.to_string_lossy().into_owned(), size_bytes: size as u64, trim: None });
         }
         let seed: u64 = std::env::var("RMM_TEST_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(9);
         let per_bank: usize = std::env::var("RMM_TEST_PER_BANK").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
@@ -938,10 +1170,31 @@ mod real_volume {
             Ok("add") => Existing::Add,
             _ => Existing::Refuse,
         };
-        let p = plan(cs, 3, per_bank, seed, None).unwrap();
+        let normalize = match std::env::var("RMM_TEST_NORMALIZE").as_deref() {
+            Ok("peak") => Some(NormMode::Peak),
+            Ok("rms") => Some(NormMode::Rms),
+            _ => None,
+        };
+        let p = plan(cs, 3, per_bank, seed, None, normalize).unwrap();
         println!("preview: {:?}", preview(card, &p, mode));
         let r = write(card, &p, mode, |pr| println!("progress {} {}/{} {} {}B", pr.phase, pr.done_files, pr.total_files, pr.current, pr.bytes_done));
         println!("result: {r:?}");
+        if r.is_ok() && normalize.is_some() {
+            for f in &p.files {
+                assert!(f.render && f.dest.ends_with(".wav"), "{} should be a rendered WAV", f.dest);
+                let on_disk = card.join(&f.dest);
+                let pf = audio::PcmFile::open(&on_disk).expect("rendered file parses");
+                assert_eq!(std::fs::metadata(&on_disk).unwrap().len(), f.size_bytes, "size estimate is exact");
+                let lv = audio::analyze(&pf, None).unwrap();
+                println!("{} peak={:.3} frames={}", f.dest, lv.peak, pf.frames());
+                let source = audio::analyze(&audio::PcmFile::open(Path::new(&f.src)).unwrap(), None).unwrap();
+                if source.peak > 0.0 {
+                    // Boost is capped at +30 dB, so very quiet sources land below -1 dBFS.
+                    let expected = (source.peak * 10f64.powf(30.0 / 20.0)).min(0.891);
+                    assert!((lv.peak - expected).abs() < 0.01, "{}: expected {expected}, got {}", f.dest, lv.peak);
+                }
+            }
+        }
         if r.is_ok() && matches!(mode, Existing::Replace) {
             let mut on_card: Vec<String> = scan::scan(card).unwrap().files.into_iter().map(|f| f.relative_path).collect();
             let mut planned: Vec<String> = p.files.iter().map(|f| f.dest.clone()).collect();

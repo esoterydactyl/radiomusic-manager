@@ -1,3 +1,4 @@
+mod audio;
 mod card;
 mod disk;
 mod scan;
@@ -38,9 +39,12 @@ fn plan_card(
     files_per_bank: usize,
     seed: u64,
     card_file_system: Option<String>,
+    normalize: Option<audio::NormMode>,
+    capacity_bytes: Option<u64>,
+    fit: bool,
 ) -> Result<card::Plan, String> {
     let max_file_bytes = (card_file_system.as_deref() == Some("FAT32")).then_some(card::FAT32_MAX_FILE_BYTES);
-    card::plan(candidates, banks, files_per_bank, seed, max_file_bytes)
+    card::plan_for_capacity(candidates, banks, files_per_bank, seed, max_file_bytes, normalize, capacity_bytes, fit)
 }
 
 /// Copies a plan onto the card at `card_path`, emitting `write-progress` events.
@@ -114,6 +118,68 @@ async fn write_card_settings(
         .map_err(|e| e.to_string())?
 }
 
+#[derive(serde::Serialize)]
+struct AudioInfo {
+    format: &'static str,
+    duration_secs: f64,
+    rate: u32,
+    channels: u16,
+    bits: u16,
+    /// Left-channel min/max per bucket, for drawing a waveform.
+    peaks: Vec<[f32; 2]>,
+}
+
+/// Format details and a waveform for one audio file.
+#[tauri::command]
+async fn audio_peaks(path: String, buckets: usize) -> Result<AudioInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let pf = audio::PcmFile::open(std::path::Path::new(&path))?;
+        Ok(AudioInfo {
+            format: pf.format_name(),
+            duration_secs: pf.duration_secs(),
+            rate: pf.rate,
+            channels: pf.channels,
+            bits: pf.bits,
+            peaks: audio::peaks(&pf, buckets.clamp(1, 8192))?,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// A short mono WAV of the file's left channel (what the Radio Music plays), as raw bytes.
+#[tauri::command]
+async fn audio_preview(path: String, start_secs: f64, max_secs: f64) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let pf = audio::PcmFile::open(std::path::Path::new(&path))?;
+        audio::preview_wav(&pf, start_secs, max_secs.min(180.0)).map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Serialize)]
+struct LevelsInfo {
+    peak_db: f64,
+    rms_db: f64,
+    /// Gain the chosen normalize mode would apply, in dB (0 when none is chosen).
+    gain_db: f64,
+}
+
+/// Peak and loudness of a file (or its trimmed part), and what normalizing would do to it.
+#[tauri::command]
+async fn audio_levels(path: String, trim: Option<audio::Trim>, mode: Option<audio::NormMode>) -> Result<LevelsInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let pf = audio::PcmFile::open(std::path::Path::new(&path))?;
+        let levels = audio::analyze(&pf, trim)?;
+        let db = |v: f64| if v < 1e-9 { f64::NEG_INFINITY } else { 20.0 * v.log10() };
+        let gain = mode.map_or(1.0, |m| audio::gain_for(levels, m));
+        Ok(LevelsInfo { peak_db: db(levels.peak), rms_db: db(levels.rms), gain_db: db(gain) })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Stops a running `write_card` after the current chunk, removing the partly written file.
 #[tauri::command]
 fn cancel_write() {
@@ -125,7 +191,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![list_volumes, scan_directory, scan_source, plan_card, write_card, preview_card_changes, cancel_write, format_card, settings_schema, read_card_settings, write_card_settings])
+        .invoke_handler(tauri::generate_handler![list_volumes, scan_directory, scan_source, plan_card, write_card, preview_card_changes, cancel_write, format_card, audio_peaks, audio_preview, audio_levels, settings_schema, read_card_settings, write_card_settings])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

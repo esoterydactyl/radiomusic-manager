@@ -127,7 +127,7 @@
           <div class="table-scroll"><table class="results">
           <thead>
             <tr>
-              <th data-sort="file">File</th><th data-sort="length">Length</th><th>Format</th>
+              <th data-sort="file">File</th><th data-sort="length">Length</th><th>Trim</th><th>Format</th>
             </tr>
           </thead>
           <tbody id="source-results"></tbody>
@@ -157,7 +157,15 @@
               <option value="add">Add new files</option>
             </select>
           </label>
+          <label class="field only-files" title="Matches volume across the files written. Your source files are never changed."><span class="label-mono">Normalize</span>
+            <select id="b-normalize">
+              <option value="off">Off</option>
+              <option value="peak">Peak to &minus;1 dB</option>
+              <option value="rms">Match loudness (RMS)</option>
+            </select>
+          </label>
           <label class="check only-files" title="Erasing formats the card, which removes its settings.txt. This puts the settings from step 2 back."><input type="checkbox" id="b-settings" /> Write settings.txt</label>
+          <label class="check only-files" title="Pick files only up to what the card can hold, instead of rolling more than will fit."><input type="checkbox" id="b-fit" checked /> Fit to card</label>
           <button type="button" class="btn only-files" id="b-roll" disabled>Roll</button>
           <button type="button" class="cta" id="b-write" disabled>Write to card</button>
           <button type="button" class="btn danger" id="b-cancel" hidden>Cancel</button>
@@ -185,6 +193,27 @@
           <span></span>
         </div>
       </section>
+      <aside class="dock" id="preview-dock" hidden aria-label="Audio preview">
+        <div class="dock-inner">
+        <div class="dock-head">
+          <span class="eyebrow">Preview</span>
+          <span class="dock-name" id="pv-name"></span>
+          <span class="dock-info" id="pv-info"></span>
+          <button type="button" class="btn" id="pv-close">Close</button>
+        </div>
+        <canvas class="wave" id="pv-canvas" height="64" aria-label="Waveform. Click to play from a point; drag the markers to trim."></canvas>
+        <div class="dock-controls">
+          <button type="button" class="btn" id="pv-play">Play</button>
+          <span class="dock-time" id="pv-time"></span>
+          <label class="field"><span class="label-mono">Start</span><input type="text" id="pv-start" size="7" spellcheck="false" autocomplete="off" /></label>
+          <button type="button" class="btn" id="pv-start-here" title="Start the sample at the playhead">Start here</button>
+          <label class="field"><span class="label-mono">End</span><input type="text" id="pv-end" size="7" spellcheck="false" autocomplete="off" /></label>
+          <button type="button" class="btn" id="pv-end-here" title="End the sample at the playhead">End here</button>
+          <button type="button" class="btn" id="pv-reset">Reset trim</button>
+          <span class="dock-stats" id="pv-stats"></span>
+        </div>
+        </div>
+      </aside>
     </main>
   </body>
 </html>

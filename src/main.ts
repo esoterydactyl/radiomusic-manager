@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
+import { closePreview, currentPreviewPath, initPreview, openPreview, refreshLevels, syncDock, trimLabel, trims, trimsSignature, type NormalizeChoice } from "./preview";
 import { compareBy, isFiltering, matches, NO_FILTERS, parseDuration, type Filters, type SortKey } from "./filters";
 
 interface AudioFileInfo {
@@ -340,7 +341,11 @@ function renderSource() {
   body.replaceChildren(
     ...visible.map((f) => {
         const tr = document.createElement("tr");
-        if (!f.eligible) tr.className = "ineligible";
+        tr.className = `pick${f.eligible ? "" : " ineligible"}${currentPreviewPath() === f.path ? " previewing" : ""}`;
+        tr.addEventListener("click", () => {
+          void openPreview(f.path, f.relative_path);
+          renderSource();
+        });
         if (f.warnings.length > 0) tr.title = f.warnings.join("; ");
         tr.append(
           cell(f.relative_path),
@@ -432,6 +437,8 @@ interface PlannedFile {
   dest: string;
   size_bytes: number;
   bank: number | null;
+  trim?: { start: number; end: number } | null;
+  render?: boolean;
 }
 
 interface Plan {
@@ -440,6 +447,10 @@ interface Plan {
   files: PlannedFile[];
   total_bytes: number;
   warnings: string[];
+  normalize?: "peak" | "rms" | null;
+  capacity_bytes?: number | null;
+  requested_files?: number;
+  requested_bytes?: number;
 }
 
 let plan: Plan | null = null;
@@ -463,10 +474,52 @@ interface ChangePreview {
 const MAX_FILES_PER_BANK = 250;
 const MAX_FILES_TOTAL = 800;
 
+/**
+ * Bytes a plan may use on the selected card: the whole card when erasing (it gets formatted), the
+ * free space otherwise. A small margin covers file-system overhead. `null` when no card is chosen.
+ */
+function usableCapacity(): number | null {
+  const vol = selectedVolume();
+  if (!vol) return null;
+  const raw = $<HTMLSelectElement>("#b-existing").value === "replace" ? vol.total_bytes : vol.available_bytes;
+  return Math.floor(raw * 0.995);
+}
+
+/** Whether the rolled plan fits the card, with the sentence to show about it. */
+function fitState(): { over: boolean; text: string } {
+  if (!plan) return { over: false, text: "" };
+  const cap = usableCapacity();
+  const size = formatBytes(plan.total_bytes);
+  if (cap === null) return { over: false, text: `${size} · select a card to check it fits` };
+
+  if (plan.total_bytes > cap) {
+    const hint = $<HTMLInputElement>("#b-fit").checked
+      ? "Roll again to fit it"
+      : "Tick Fit to card, lower the banks or files per bank, or tighten the filters";
+    const note = $<HTMLSelectElement>("#b-existing").value === "add" ? " (files already on the card are skipped, so the real size may be smaller)" : "";
+    return {
+      over: true,
+      text: `TOO BIG: ${size} won't fit. The card holds ${formatBytes(cap)}, so this is over by ${formatBytes(plan.total_bytes - cap)}. ${hint}.${note}`,
+    };
+  }
+  const trimmed =
+    plan.requested_files && plan.requested_files > plan.files.length
+      ? ` · fit to card: ${plan.files.length} of the ${plan.requested_files} files you asked for`
+      : "";
+  return { over: false, text: `${size} of ${formatBytes(cap)} (${Math.round((100 * plan.total_bytes) / cap)}%)${trimmed}` };
+}
+
+function normalizeValue(): NormalizeChoice {
+  return $<HTMLSelectElement>("#b-normalize").value as NormalizeChoice;
+}
+
+/** What a plan was built from: any change to the pool, the trims or the normalize mode makes it stale. */
 function poolKey(): string {
-  return poolFiles()
-    .map((f) => f.path)
-    .join("\n");
+  return (
+    poolFiles()
+      .map((f) => f.path)
+      .join("\n") + `|${trimsSignature()}|${normalizeValue()}|fit:${$<HTMLInputElement>("#b-fit").checked}`
+  );
 }
 
 function selectedVolume(): Volume | undefined {
@@ -583,7 +636,14 @@ function renderFiles() {
   body.replaceChildren(
     ...files.map((f) => {
       const tr = document.createElement("tr");
-      tr.append(cell(bankLabel(f.bank), "dim"), cell(f.dest), cell(f.src.replace(sourceDir ?? "", "").replace(/^\//, "")));
+      const notes = [f.trim ? `trimmed ${trimLabel(f.trim)}` : null, f.render && plan?.normalize ? "normalized" : null].filter(Boolean);
+      tr.className = "pick";
+      tr.addEventListener("click", () => void openPreview(f.src, f.dest));
+      tr.append(
+        cell(bankLabel(f.bank), "dim"),
+        cell(notes.length ? `${f.dest} · ${notes.join(", ")}` : f.dest),
+        cell(f.src.replace(sourceDir ?? "", "").replace(/^\//, "")),
+      );
       return tr;
     }),
   );
@@ -625,7 +685,8 @@ function updateBuildPanel() {
   const vol = selectedVolume();
   const cardOk = !!vol && vol.warnings.length === 0;
   ($("#b-roll") as HTMLButtonElement).disabled = writing || formatting || pool.length === 0 || perBank === null;
-  ($("#b-write") as HTMLButtonElement).disabled = writing || formatting || !plan || !cardOk;
+  const fits = fitState();
+  ($("#b-write") as HTMLButtonElement).disabled = writing || formatting || !plan || !cardOk || fits.over;
 
   // Say why Write is unavailable instead of leaving a silently dimmed button.
   let reason = "";
@@ -634,15 +695,21 @@ function updateBuildPanel() {
   else if (!plan) reason = "Press Roll to pick a random selection";
   else if (!vol) reason = "Select a card in step 1";
   else if (!cardOk) reason = "The selected card is not usable";
+  else if (fits.over) reason = "The selection is too big for the card";
   ($("#b-write") as HTMLButtonElement).title = reason;
   updateTabs();
   ($("#b-cancel") as HTMLElement).hidden = !writing;
   updateFormatPanel();
 
-  if (!writing && !$("#b-status").dataset.sticky) {
-    $("#b-status").textContent = plan
-      ? `${plan.files.length} files · ${formatBytes(plan.total_bytes)} · seed ${plan.seed}` +
-        (cardOk ? ` · ready to write to ${vol!.name || vol!.mount_point}` : ` · ${reason.toLowerCase()}`)
+  const status = $("#b-status");
+  const showing = !writing && !status.dataset.sticky;
+  status.classList.toggle("status-bad", showing && fits.over);
+  if (showing) {
+    status.textContent = plan
+      ? fits.over
+        ? `${plan.files.length} files · ${fits.text}`
+        : `${plan.files.length} files · ${fits.text} · seed ${plan.seed}` +
+          (cardOk ? ` · ready to write to ${vol!.name || vol!.mount_point}` : ` · ${reason.toLowerCase()}`)
       : sourceScan && pool.length > 0
         ? `${reason}, then Write to card.`
         : "";
@@ -651,6 +718,7 @@ function updateBuildPanel() {
 
 function setBuildStatus(text: string, sticky = false) {
   const el = $("#b-status");
+  el.classList.remove("status-bad");
   el.textContent = text;
   if (sticky) el.dataset.sticky = "1";
   else delete el.dataset.sticky;
@@ -664,11 +732,14 @@ async function roll() {
   setBuildStatus("");
   try {
     plan = await invoke<Plan>("plan_card", {
-      candidates: pool.map((f) => ({ path: f.path, size_bytes: f.size_bytes })),
+      candidates: pool.map((f) => ({ path: f.path, size_bytes: f.size_bytes, trim: trims.get(f.path) ?? null })),
       banks: banksValue(),
       filesPerBank: perBank,
       seed: crypto.getRandomValues(new Uint32Array(1))[0],
       cardFileSystem: selectedVolume()?.file_system ?? null,
+      normalize: normalizeValue() === "off" ? null : normalizeValue(),
+      capacityBytes: usableCapacity(),
+      fit: $<HTMLInputElement>("#b-fit").checked,
     });
     planPoolKey = poolKey();
   } catch (err) {
@@ -965,6 +1036,7 @@ function setSettingsOnly(on: boolean) {
   delete $("#b-status").dataset.sticky;
   $("#b-status").textContent = "";
   updateBuildPanel();
+  syncDock(currentStep, settingsOnly);
 }
 
 function updateSettingsOnlyPanel() {
@@ -1224,7 +1296,12 @@ async function initSettings() {
 type Step = "card" | "settings" | "files" | "build";
 const STEPS: Step[] = ["card", "settings", "files", "build"];
 
+let currentStep: Step = "card";
+
 function showStep(step: Step, focus = false) {
+  // Leaving a tab ends any preview, so coming back finds the screen as you left it.
+  if (step !== currentStep) closePreview();
+  currentStep = step;
   for (const s of STEPS) {
     const on = s === step;
     const tab = $(`#tab-${s}`);
@@ -1234,6 +1311,7 @@ function showStep(step: Step, focus = false) {
   }
   if (focus) $(`#tab-${step}`).focus();
   if (step === "build") updateBuildPanel();
+  syncDock(step, settingsOnly);
 }
 
 function setStepState(step: Step, meta: string, state: "todo" | "done" | "warn") {
@@ -1297,6 +1375,17 @@ function wireTabs() {
 
 window.addEventListener("DOMContentLoaded", () => {
   wireTabs();
+  initPreview({
+    onTrimChange: () => {
+      renderSource();
+      updateBuildPanel();
+    },
+    getNormalize: normalizeValue,
+  });
+  $("#b-normalize").addEventListener("change", () => {
+    updateBuildPanel();
+    void refreshLevels();
+  });
   for (const id of ["#skip-files", "#b-skip"]) {
     $(id).addEventListener("change", (e) => setSettingsOnly((e.target as HTMLInputElement).checked));
   }
@@ -1363,7 +1452,9 @@ window.addEventListener("DOMContentLoaded", () => {
   } catch {
     // storage unavailable; the mode just won't be remembered
   }
+  $("#b-fit").addEventListener("change", updateBuildPanel);
   $("#b-existing").addEventListener("change", () => {
+    updateBuildPanel();
     try {
       localStorage.setItem(EXISTING_KEY, $<HTMLSelectElement>("#b-existing").value);
     } catch {
