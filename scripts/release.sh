@@ -53,6 +53,13 @@ if ! security find-certificate -c "$APPLE_SIGNING_IDENTITY" -p \
   die "signing certificate expires within 30 days; renew it first"
 fi
 
+# Signing needs Apple's timestamp server; check it now rather than after the build.
+TS_PROBE=$(mktemp -d)/probe
+cp /bin/echo "$TS_PROBE"
+codesign -f --timestamp -s "$APPLE_SIGNING_IDENTITY" "$TS_PROBE" 2>/dev/null \
+  || die "timestamped signing failed; is timestamp.apple.com reachable (VPN, firewall)? Try again shortly"
+rm -rf "$(dirname "$TS_PROBE")"
+
 # Notarization: an App Store Connect API key, or an Apple ID with an app-specific password.
 if [ -n "${APPLE_API_KEY:-}" ]; then
   : "${APPLE_API_ISSUER:?set APPLE_API_ISSUER}" "${APPLE_API_KEY_PATH:?set APPLE_API_KEY_PATH}"
