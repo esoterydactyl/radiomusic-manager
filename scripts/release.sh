@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a signed, notarized, universal macOS DMG and attach it to a draft
+# Build a signed, notarized, universal macOS DMG and publish it as a
 # GitHub release for the version in src-tauri/tauri.conf.json.
 #
 # Credentials are read from the environment, or from release.env.local
@@ -113,11 +113,11 @@ fi
 
 # --- release ---------------------------------------------------------------
 
-step "Creating draft GitHub release $TAG"
+step "Publishing GitHub release $TAG"
 git tag -a "$TAG" -m "Release $TAG"
 git push origin "$TAG"
-gh release create "$TAG" "$DMG" --draft --title "$TAG" --generate-notes
+gh release create "$TAG" "$DMG" --title "$TAG" --generate-notes
 
 echo
-echo "Draft release created. Review and publish it on GitHub:"
+echo "Release published:"
 gh release view "$TAG" --json url -q .url
